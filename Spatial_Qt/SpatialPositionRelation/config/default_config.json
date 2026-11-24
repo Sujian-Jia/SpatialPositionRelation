@@ -1,0 +1,133 @@
+{
+  "relativeDistanceM": 20.0,
+  "demoGapM": 0.12,
+  "trajectoryForecastStepSec": 10.0,
+  "demoTrajectoryPoints": [
+    { "tSec": 0, "relativePositionM": [0, 7, 20], "relativeEulerDeg": [0, -8, 0] },
+    { "tSec": 240, "relativePositionM": [0, 0, 20], "relativeEulerDeg": [0, 0, 0] },
+    { "tSec": 680, "relativePositionM": [0, 0, 6], "relativeEulerDeg": [0, 0, 0] },
+    { "tSec": 1080, "relativePositionM": [0, 0, 0], "relativeEulerDeg": [0, 0, 0] }
+  ],
+  "viewSensorId": "",
+  "overviewMode": "fixed",
+  "displaySensorIds": ["CRDS-PORT", "TV-DOCK-WIDE"],
+  "activePair": {
+    "target": "SpaceStation",
+    "chaser": "CrewVehicle"
+  },
+  "jointsDeg": [0, 0, 0, 0, 0, 0, 0],
+  "orbit": {
+    "altitudeKm": 600.0,
+    "eccentricity": 0.001,
+    "inclinationDeg": 51.6,
+    "raanDeg": 0.0,
+    "argPeriapsisDeg": 0.0,
+    "meanAnomalyDeg": 0.0,
+    "timeScale": 60.0,
+    "leapSeconds": 37,
+    "epochUtc": "2026-11-21T00:00:00Z"
+  },
+  "attitude": {
+    "mode": "euler",
+    "eulerDeg": [0.0, 0.0, 0.0],
+    "quaternionWxyz": [1.0, 0.0, 0.0, 0.0]
+  },
+  "sensors": [
+    {
+      "id": "CRDS-PORT",
+      "name": "CRDS 对接标志",
+      "kind": "CRDS",
+      "enabled": true,
+      "mount": "ChaserHull",
+      "positionReference": "modelSurface",
+      "localPositionM": [0.0, 0.0, 0.0],
+      "localEulerDeg": [0.0, 90.0, 0.0],
+      "horizontalFovDeg": 32.0,
+      "verticalFovDeg": 32.0,
+      "warningEnabled": true,
+      "warningThreshold": 0.3,
+      "targetId": "ACTIVE_TARGET",
+      "sampleRadiusM": 0.35
+    },
+    {
+      "id": "TV-DOCK-WIDE",
+      "name": "对接电视相机 A（验证位姿）",
+      "kind": "TV",
+      "enabled": true,
+      "mount": "ChaserHull",
+      "positionReference": "modelSurface",
+      "localPositionM": [0.0, 0.0, 0.0],
+      "localEulerDeg": [0.0, 90.0, 0.0],
+      "horizontalFovDeg": 55.0,
+      "verticalFovDeg": 55.0,
+      "warningEnabled": false,
+      "warningThreshold": 0.3,
+      "targetId": "ACTIVE_TARGET",
+      "sampleRadiusM": 0.35
+    },
+    {
+      "id": "TV-DOCK-NARROW",
+      "name": "对接电视相机 B（验证位姿）",
+      "kind": "TV",
+      "enabled": true,
+      "mount": "ChaserHull",
+      "positionReference": "modelSurface",
+      "localPositionM": [0.0, 0.0, 0.0],
+      "localEulerDeg": [0.0, 90.0, 0.0],
+      "horizontalFovDeg": 55.0,
+      "verticalFovDeg": 55.0,
+      "warningEnabled": false,
+      "warningThreshold": 0.3,
+      "targetId": "ACTIVE_TARGET",
+      "sampleRadiusM": 0.35
+    },
+    {
+      "id": "TV-ARM-WRIST",
+      "name": "机械臂腕部相机 A（验证位姿）",
+      "kind": "TV",
+      "enabled": true,
+      "mount": "ArmWrist",
+      "positionReference": "modelSurface",
+      "localPositionM": [0.0, 0.0, 0.0],
+      "localEulerDeg": [0.0, 90.0, 0.0],
+      "horizontalFovDeg": 55.0,
+      "verticalFovDeg": 55.0,
+      "warningEnabled": true,
+      "warningThreshold": 0.3,
+      "targetId": "ACTIVE_TARGET",
+      "sampleRadiusM": 0.35
+    },
+    {
+      "id": "TV-ARM-WRIST-B",
+      "name": "机械臂腕部相机 B（偏置验证位）",
+      "kind": "TV",
+      "enabled": true,
+      "mount": "ArmWrist",
+      "positionReference": "modelSurface",
+      "localPositionM": [0.0, 0.0, 0.0],
+      "localEulerDeg": [0.0, 90.0, 0.0],
+      "horizontalFovDeg": 55.0,
+      "verticalFovDeg": 55.0,
+      "warningEnabled": false,
+      "warningThreshold": 0.3,
+      "targetId": "ACTIVE_TARGET",
+      "sampleRadiusM": 0.35
+    },
+    {
+      "id": "TV-ARM-ELBOW",
+      "name": "机械臂肘部云台相机（验证位姿）",
+      "kind": "TV",
+      "enabled": true,
+      "mount": "ArmElbow",
+      "positionReference": "modelSurface",
+      "localPositionM": [0.0, 0.0, 0.0],
+      "localEulerDeg": [0.0, 90.0, 0.0],
+      "horizontalFovDeg": 55.0,
+      "verticalFovDeg": 55.0,
+      "warningEnabled": false,
+      "warningThreshold": 0.3,
+      "targetId": "ACTIVE_TARGET",
+      "sampleRadiusM": 0.35
+    }
+  ]
+}

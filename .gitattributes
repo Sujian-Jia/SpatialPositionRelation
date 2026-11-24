@@ -1,0 +1,2 @@
+SpatialPositionRelation/Assets/Model/*.FBX filter=lfs diff=lfs merge=lfs -text
+SpatialPositionRelation/Assets/Model/*.fbx filter=lfs diff=lfs merge=lfs -text

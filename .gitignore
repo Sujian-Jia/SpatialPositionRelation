@@ -1,0 +1,53 @@
+# ============================================================
+#  鏍圭洰褰曠櫧鍚嶅崟锛氬彧鏀捐涓嬮潰涓や釜宸ョ▼鐩綍锛屽叾浣欙紙dist 绛夛級涓€寰嬪拷鐣?# ============================================================
+/*
+!/.gitignore
+!/.gitattributes
+!/SpatialPositionRelation/
+!/Spatial_Qt/
+
+# ============================================================
+#  褰掓。锛?9 GB锛屼笉鍙備笌鐗堟湰绠＄悊
+# ============================================================
+/褰掓。/
+
+# ============================================================
+#  Unity 鑷姩鐢熸垚鐗╋紙鍙噸寤猴紝涓嶅簲鍏ュ簱锛?# ============================================================
+/SpatialPositionRelation/[Ll]ibrary/
+/SpatialPositionRelation/[Tt]emp/
+/SpatialPositionRelation/[Oo]bj/
+/SpatialPositionRelation/[Bb]uild/
+/SpatialPositionRelation/[Bb]uilds/
+/SpatialPositionRelation/[Ll]ogs/
+/SpatialPositionRelation/[Mm]emoryCaptures/
+/SpatialPositionRelation/[Rr]ecordings/
+/SpatialPositionRelation/[Uu]ser[Ss]ettings/
+/SpatialPositionRelation/.vs/
+/SpatialPositionRelation/.idea/
+/SpatialPositionRelation/*.csproj
+/SpatialPositionRelation/*.sln
+/SpatialPositionRelation/*.suo
+/SpatialPositionRelation/*.user
+/SpatialPositionRelation/*.userprefs
+/SpatialPositionRelation/*.pidb
+/SpatialPositionRelation/*.booproj
+/SpatialPositionRelation/*.svd
+/SpatialPositionRelation/*.pdb
+/SpatialPositionRelation/*.mdb
+
+# ============================================================
+#  Qt 鏋勫缓鐩綍
+# ============================================================
+/Spatial_Qt/SpatialPositionRelation/build/
+
+# ============================================================
+#  鎵撳寘浜х墿锛?22 MB锛屽惈 >100 MB 鍗曟枃浠讹紝GitHub 鎷掓敹锛?# ============================================================
+/dist/
+
+# ============================================================
+#  绯荤粺 / 缂栬緫鍣ㄦ潅椤?# ============================================================
+Thumbs.db
+Desktop.ini
+.DS_Store
+*.log
+*.tmp
