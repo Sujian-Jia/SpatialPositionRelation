@@ -6,6 +6,10 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
+/// <summary>
+/// 这是项目已有的编辑器排查工具，用不同场景或组件组合构建 Player，以便定位启动问题。
+/// 这里的 smoke 指快速覆盖启动路径的冒烟检查入口，正式演示构建入口是 SpatialSceneBuilder.BuildWindowsPlayer。
+/// </summary>
 public static class SpatialPlayerSmokeTest
 {
     public static void BuildDefaultScenePlayer()

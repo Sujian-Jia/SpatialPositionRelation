@@ -1,5 +1,9 @@
 using UnityEngine;
 
+/// <summary>
+/// 单独实现传感器视锥线框的绘制；几何计算和数据统计在同类的另一部分。
+/// partial 将类拆进多个文件，但它们仍属于同一个 C# 类型。
+/// </summary>
 public abstract partial class SpatialSensorViewBase
 {
     public bool ShowRays { get; set; }
@@ -8,11 +12,21 @@ public abstract partial class SpatialSensorViewBase
         Mathf.Tan(Mathf.Clamp(configuration.horizontalFovDeg, 1, 179) * Mathf.Deg2Rad * 0.5f)
         / Mathf.Tan(Mathf.Clamp(configuration.verticalFovDeg, 1, 179) * Mathf.Deg2Rad * 0.5f);
 
+    /// <summary>
+    /// 在 Unity 每帧稍晚阶段重画视锥线，跟上相机或父物体本帧的位置变化。
+    /// LateUpdate 是生命周期钩子，通常在 Update 之后执行，不代表独立线程。
+    /// </summary>
     private void LateUpdate()
     {
         DrawFrustum();
     }
 
+    /// <summary>
+    /// 用相机位置、方向和水平/垂直视场生成四条视锥边线。
+    /// 距离无穷时用 18 米，绘制长度再限制在 4 至 50 米；半宽 x=L·tan(水平半视场)，半高 y=L·tan(垂直半视场)。
+    /// 不显示射线或缺配置时禁用线；配置有效时四个角点在相机本地的 z=L 平面上，再旋转和平移到世界坐标。
+    /// 遥测的 frustumVertex 读第一条线的起点（即视锥原点），不是远端角点。
+    /// </summary>
     public void DrawFrustum()
     {
         float distance = frustumDistance;

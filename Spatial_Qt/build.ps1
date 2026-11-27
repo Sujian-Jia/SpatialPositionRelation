@@ -1,4 +1,4 @@
-param()
+param([string]$DistributionDirectory)
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -10,7 +10,7 @@ $qtBin = 'D:\Software\QT\6.12.0\mingw_64\bin'
 $mingwBin = 'D:\Software\QT\Tools\mingw1310_64\bin'
 $cmakeExe = 'D:\Software\QT\Tools\CMake_64\bin\cmake.exe'
 $deployExe = Join-Path $qtBin 'windeployqt.exe'
-$distRoot = Join-Path $projectRoot 'dist'
+$distRoot = if ($DistributionDirectory) { [IO.Path]::GetFullPath($DistributionDirectory) } else { Join-Path $projectRoot 'dist' }
 $evidenceRoot = Join-Path $qtRoot 'build/logs'
 $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
 New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
@@ -57,6 +57,9 @@ function Invoke-CapturedProcess {
     $lines | Set-Content -LiteralPath $LogPath -Encoding utf8
     if ($process.ExitCode -ne 0) { throw "$Name failed with exit code $($process.ExitCode). Log: $LogPath" }
 }
+
+$nativeLog = Join-Path $evidenceRoot "native7dof-$stamp.log"
+& (Join-Path $unityRoot 'Native7Dof/build-native.ps1') -Verify *> $nativeLog
 
 $testLog = Join-Path $evidenceRoot "unity-algorithm-tests-$stamp.log"
 Invoke-CapturedProcess 'Unity occlusion algorithm checks' $unityExe @(
@@ -112,7 +115,8 @@ Copy-Item -LiteralPath (Join-Path $qtRoot 'config/发布使用说明.md') `
     "UnityExe=$(Join-Path $unityDistRoot 'SpatialUnity.exe')",
     "UnityAlgorithmLog=$testLog",
     "UnityPlayerLog=$unityBuildLog",
-    "QtBuildLog=$qtBuildLog"
+    "QtBuildLog=$qtBuildLog",
+    "Native7DofLog=$nativeLog"
 ) | Set-Content -LiteralPath (Join-Path $evidenceRoot "build-summary-$stamp.log") -Encoding utf8
 @(
     "Build=$stamp",
@@ -123,3 +127,4 @@ Copy-Item -LiteralPath (Join-Path $qtRoot 'config/发布使用说明.md') `
     "DefaultConfigSHA256=$((Get-FileHash -LiteralPath (Join-Path $distRoot 'config/default_config.json')).Hash)"
 ) | Set-Content -LiteralPath (Join-Path $distRoot 'BUILD_VERSION.txt') -Encoding utf8
 Write-Output "Build completed. Launch: $distRoot\SpatialPositionRelation.exe"
+

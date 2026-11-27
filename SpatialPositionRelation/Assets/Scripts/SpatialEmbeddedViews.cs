@@ -2,6 +2,10 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
+/// <summary>
+/// 把总览和选中的传感器相机排进同一个 Unity 窗口，处理鼠标和视图模式。
+/// 多个 Camera 渲染到同一屏幕的不同矩形；这些显示设置与传感器的几何计算分别维护。
+/// </summary>
 public sealed class SpatialEmbeddedViews : MonoBehaviour
 {
     public Camera overviewCamera;
@@ -40,6 +44,10 @@ public sealed class SpatialEmbeddedViews : MonoBehaviour
         guiStylesReady = true;
     }
 
+    /// <summary>
+    /// 首次绘制前关掉各传感器相机并建一台背景相机，随后由布局决定开启哪些机位。
+    /// 这是 Unity 的 Start 钩子；背景相机渲染深度更低，剔除掩码 0 表示只清背景，不画场景物体。
+    /// </summary>
     private void Start()
     {
         if (sensorViews == null) sensorViews = Array.Empty<SpatialSensorView>();
@@ -77,6 +85,11 @@ public sealed class SpatialEmbeddedViews : MonoBehaviour
         ApplyOverviewPose();
     }
 
+    /// <summary>
+    /// 本帧位姿就绪后重新排相机画面：左边总览、右边按显示机位等分，或单独放大一个机位。
+    /// LateUpdate 在 Update 之后；窗口像素宽高至少取 1，右列取窗口宽 32% 与高度 72% 的较小值。
+    /// 高度先转 float 再除机位数，保留小数像素。单独放大时按槽位宽高比调整垂直视场，避免把两轴各自拉伸。
+    /// </summary>
     private void LateUpdate()
     {
         if (overviewCamera == null) return;
@@ -149,11 +162,19 @@ public sealed class SpatialEmbeddedViews : MonoBehaviour
         ApplyOverviewPose();
     }
 
+    /// <summary>
+    /// 窗口失焦时结束本次相机拖拽，避免回来后继续用旧的鼠标按钮状态。
+    /// Unity 在应用焦点变化时调用这个钩子；−1 表示未记录拖动按键。
+    /// </summary>
     private void OnApplicationFocus(bool focused)
     {
         if (!focused) dragButton = -1;
     }
 
+    /// <summary>
+    /// 绘制切换开关和机位标签，并把总览区鼠标输入换成相机平移、旋转或缩放。
+    /// 这是 Unity 即时模式界面回调，可能同一帧收到多种事件；Event.current 表示当前调用对应的事件。
+    /// </summary>
     private void OnGUI()
     {
         if (overviewCamera == null) return;
@@ -279,6 +300,10 @@ public sealed class SpatialEmbeddedViews : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// 用焦点和偏移放置总览镜头；拖拽模式还叠加用户的平移、旋转和缩放。
+    /// 相机位置是焦点加偏移，LookAt 再让镜头朝焦点；这些只影响观察视角。
+    /// </summary>
     private void ApplyOverviewPose()
     {
         if (overviewCamera == null) return;
@@ -294,6 +319,10 @@ public sealed class SpatialEmbeddedViews : MonoBehaviour
         overviewCamera.fieldOfView = overviewFov;
     }
 
+    /// <summary>
+    /// 把左上为原点的像素矩形换成相机使用的左下原点、0 到 1 的归一化矩形。
+    /// 用矩形底边像素坐标除以高度，再用 1 减结果，完成 Y 方向翻转。
+    /// </summary>
     private static Rect ToCameraRect(Rect screenRect, int width, int height)
     {
         return new Rect(screenRect.x / width, 1f - (screenRect.y + screenRect.height) / height,
@@ -328,6 +357,10 @@ public sealed class SpatialEmbeddedViews : MonoBehaviour
                 visibleSensorIds.Add(sensorViews[i].sensorId);
     }
 
+    /// <summary>
+    /// 把用户选的总览模式和显示机位送到 Qt，由 Qt 保存这两项设置。
+    /// 消息类型为 uiEvent，事件名为 viewSettings；序号这里取 UTC 的 Ticks，与仿真的遥测计数分开。
+    /// </summary>
     private void SendSettings()
     {
         if (tcpBridge == null) return;

@@ -33,6 +33,8 @@ QDoubleSpinBox *MainWindow::makeSpin(double minimum, double maximum, double step
     return spin;
 }
 
+// 创建 Qt 控制面板、参数控件、Unity 原生窗口容器和遥测表格。
+// 控件信号由 connectControls 绑定；这里的视口让 Player 可以作为子窗口显示，而不是用 Qt 重画 3D 场景。
 void MainWindow::buildUi()
 {
     setWindowTitle("空间位置关系计算模块");
@@ -76,37 +78,38 @@ void MainWindow::buildUi()
     auto *motionLayout = new QVBoxLayout(motionTab);
     motionLayout->setContentsMargins(8, 8, 8, 8);
     auto *pairForm = new QFormLayout;
-    m_targetCraft = new QComboBox(motionTab);
-    m_chaserCraft = new QComboBox(motionTab);
-    const QList<QPair<QString, QString>> craftChoices = {
-        {"空间站（参考模型）", "SpaceStation"}, {"载人飞船（参考模型）", "CrewVehicle"},
-        {"货运飞船（参考模型）", "CargoVehicle"}, {"光学仓（验证件）", "OpticalModule"}};
-    for (const auto &choice : craftChoices) {
-        m_targetCraft->addItem(choice.first, choice.second);
-        m_chaserCraft->addItem(choice.first, choice.second);
-    }
-    m_chaserCraft->setCurrentIndex(1);
-    pairForm->addRow("目标航天器", m_targetCraft);
-    pairForm->addRow("追踪航天器", m_chaserCraft);
+    pairForm->addRow("己方（机械臂与敏感器）", new QLabel("空间站 · 组内参考模型"));
+    pairForm->addRow("目标（初段主动接近）", new QLabel("来访器 · 同组参考模型"));
     motionLayout->addLayout(pairForm);
 
     auto *distanceGroup = new QGroupBox("相对位置");
     auto *distanceLayout = new QVBoxLayout(distanceGroup);
-    auto *distanceHeader = new QHBoxLayout;
-    distanceHeader->addWidget(new QLabel("对接距离"));
-    distanceHeader->addStretch(1);
-    m_distanceLabel = new QLabel("20.0 m");
-    distanceHeader->addWidget(m_distanceLabel);
-    distanceLayout->addLayout(distanceHeader);
-    m_distanceSlider = new QSlider(Qt::Horizontal, distanceGroup);
-    m_distanceSlider->setRange(1, 1000);
-    m_distanceSlider->setPageStep(50);
-    distanceLayout->addWidget(m_distanceSlider);
+    auto *distances = new QGridLayout;
+    m_distanceLabel = new QLabel("—");
+    m_centerDistanceLabel = new QLabel("—");
+    m_axialGapLabel = new QLabel("—");
+    m_toolDistanceLabel = new QLabel("—");
+    distances->addWidget(new QLabel("端口间距"), 0, 0);
+    distances->addWidget(m_distanceLabel, 0, 1);
+    distances->addWidget(new QLabel("质心间距"), 0, 2);
+    distances->addWidget(m_centerDistanceLabel, 0, 3);
+    distances->addWidget(new QLabel("轴向间隙"), 1, 0);
+    distances->addWidget(m_axialGapLabel, 1, 1);
+    distances->addWidget(new QLabel("工具距抓捕点"), 1, 2);
+    distances->addWidget(m_toolDistanceLabel, 1, 3);
+    distanceLayout->addLayout(distances);
     auto *demoActions = new QHBoxLayout;
-    m_demoButton = new QPushButton("对接演示", distanceGroup);
+    m_demoButton = new QPushButton("播放", distanceGroup);
     auto *resetDemo = new QPushButton("复位", distanceGroup);
     demoActions->addWidget(m_demoButton);
     demoActions->addWidget(resetDemo);
+    m_dynamicsSpeed = makeSpin(0.25, 16, 0.25, 2);
+    m_dynamicsSpeed->setValue(1);
+    m_dynamicsSpeed->setSuffix("×");
+    m_dynamicsSpeed->setMinimumWidth(64);
+    m_dynamicsSpeed->setToolTip("动力学播放倍率，和轨道日照倍率独立");
+    demoActions->addWidget(new QLabel("倍率"));
+    demoActions->addWidget(m_dynamicsSpeed);
     distanceLayout->addLayout(demoActions);
     m_demoStatus = new QLabel("待开始", distanceGroup);
     m_demoStatus->setWordWrap(true);
@@ -128,36 +131,26 @@ void MainWindow::buildUi()
     rayRow->addWidget(m_raySensor, 1);
     distanceLayout->addLayout(rayRow);
     connect(m_demoButton, &QPushButton::clicked, this, [this] {
-        if (m_demoActive) return;
-        m_demoActive = true;
-        m_demoPrepared = false;
-        m_targetCraft->setCurrentIndex(m_targetCraft->findData("SpaceStation"));
-        m_chaserCraft->setCurrentIndex(m_chaserCraft->findData("CrewVehicle"));
-        ++m_demoRunId;
-        m_demoButton->setEnabled(false);
-        m_distanceSlider->setEnabled(false);
-        m_targetCraft->setEnabled(false);
-        m_chaserCraft->setEnabled(false);
-        m_demoStatus->setText("对接演示进行中…");
+        if (m_demoFinished) {
+            ++m_demoRunId;
+            m_dynamicsEventsShown = 0;
+            m_demoFinished = false;
+        }
+        m_demoActive = !m_demoActive;
+        m_demoButton->setText(m_demoActive ? "暂停" : "继续");
+        startupEvent(m_demoActive ? "dynamics-play" : "dynamics-pause");
         sendState();
     });
     connect(resetDemo, &QPushButton::clicked, this, [this] {
-        const bool prepareDemo = m_demoActive || m_demoPrepared;
         m_demoActive = false;
-        m_demoPrepared = false;
+        m_demoFinished = false;
         ++m_demoRunId;
-        m_distanceSlider->setEnabled(true);
-        m_targetCraft->setEnabled(true);
-        m_chaserCraft->setEnabled(true);
-        m_distanceSlider->setValue(qRound(m_defaultConfig.value("relativeDistanceM").toDouble(20) * 10));
-        const QJsonArray joints = m_defaultConfig.value("jointsDeg").toArray();
-        for (int i = 0; i < m_jointSliders.size(); ++i)
-            m_jointSliders[i]->setValue(i < joints.size() ? qRound(joints[i].toDouble()) : 0);
-        m_demoPrepared = prepareDemo;
-        m_demoStatus->setText(prepareDemo ? "已复位到演示起点" : "待开始");
+        m_dynamicsEventsShown = 0;
+        startupEvent("dynamics-reset");
+        m_demoButton->setText("播放");
+        m_demoStatus->setText("正在复位到工况起点…");
         m_telemetryTable->setRowCount(0);
         m_lastTelemetry.clear();
-        updateStartupStatus();
         sendState();
     });
     motionLayout->addWidget(distanceGroup);
@@ -165,15 +158,12 @@ void MainWindow::buildUi()
     auto *jointGroup = new QGroupBox("机械臂关节角");
     auto *jointLayout = new QGridLayout(jointGroup);
     for (int i = 0; i < 7; ++i) {
-        auto *slider = new QSlider(Qt::Horizontal, jointGroup);
-        slider->setRange(-180, 180);
-        auto *value = new QLabel("0°");
-        value->setMinimumWidth(42);
-        value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        jointLayout->addWidget(new QLabel(QString("J%1").arg(i + 1)), i, 0);
-        jointLayout->addWidget(slider, i, 1);
-        jointLayout->addWidget(value, i, 2);
-        m_jointSliders.append(slider);
+        auto *value = new QLabel("—");
+        value->setMinimumWidth(46);
+        const int row = i / 4;
+        const int column = (i % 4) * 2;
+        jointLayout->addWidget(new QLabel(QString("J%1").arg(i + 1)), row, column);
+        jointLayout->addWidget(value, row, column + 1);
         m_jointValueLabels.append(value);
     }
     motionLayout->addWidget(jointGroup);
@@ -188,7 +178,7 @@ void MainWindow::buildUi()
     wingMode->addWidget(m_manualSolarDiagnostic);
     m_manualSolarRole = new QComboBox(wingGroup);
     m_manualSolarRole->addItem("目标航天器", "target");
-    m_manualSolarRole->addItem("追踪航天器", "chaser");
+    m_manualSolarRole->addItem("己方航天器", "chaser");
     m_manualSolarRole->addItem("两器同时", "both");
     m_manualSolarRole->setEnabled(false);
     connect(m_manualSolarDiagnostic, &QCheckBox::toggled, m_manualSolarRole, &QWidget::setEnabled);
@@ -285,30 +275,15 @@ void MainWindow::buildUi()
     orbitForm->addRow("轨道历元", m_epochUtcEdit);
     orbitLayout->addWidget(new QLabel("轨道参数（地心惯性系）"));
     orbitLayout->addLayout(orbitForm);
-    m_attitudeMode = new QComboBox(orbitTab);
-    m_attitudeMode->addItem("欧拉角", "euler");
-    m_attitudeMode->addItem("四元数 WXYZ", "quaternion");
-    orbitLayout->addWidget(m_attitudeMode);
-    auto *attitudeForm = new QFormLayout;
-    m_eulerAttitudeEditor = new QWidget(orbitTab);
-    auto *eulerLayout = new QFormLayout(m_eulerAttitudeEditor);
-    for (const auto &axis : axes) {
-        auto *spin = makeSpin(-180, 180, 1, 1);
-        m_attitudeSpins.append(spin);
-        eulerLayout->addRow("航天器姿态 " + axis + " (°)", spin);
-    }
-    m_quaternionAttitudeEditor = new QWidget(orbitTab);
-    auto *quaternionLayout = new QFormLayout(m_quaternionAttitudeEditor);
-    const QStringList quaternionAxes = {"W", "X", "Y", "Z"};
-    for (const auto &axis : quaternionAxes) {
-        auto *spin = makeSpin(-1, 1, 0.01, 6);
-        m_quaternionSpins.append(spin);
-        quaternionLayout->addRow("q" + axis, spin);
-    }
-    attitudeForm->addRow("欧拉角", m_eulerAttitudeEditor);
-    attitudeForm->addRow("四元数", m_quaternionAttitudeEditor);
-    orbitLayout->addLayout(attitudeForm);
-    m_quaternionAttitudeEditor->hide();
+    orbitLayout->addWidget(new QLabel("两器惯性姿态（Unity 坐标，四元数 WXYZ）"));
+    auto *attitudes = new QFormLayout;
+    m_stationAttitude = new QLabel("—");
+    m_visitorAttitude = new QLabel("—");
+    m_stationAttitude->setWordWrap(true);
+    m_visitorAttitude->setWordWrap(true);
+    attitudes->addRow("己方", m_stationAttitude);
+    attitudes->addRow("目标", m_visitorAttitude);
+    orbitLayout->addLayout(attitudes);
     orbitLayout->addStretch(1);
     tabs->addTab(orbitTab, "轨道/姿态");
     controlLayout->addWidget(tabs);
@@ -359,36 +334,16 @@ void MainWindow::buildUi()
     connect(m_recordButton, &QPushButton::clicked, this, &MainWindow::toggleFrameRecording);
 }
 
+// 把滑块、下拉框和复选框变化连接到状态发送或本地编辑响应。
+// 70 毫秒单次定时器合并快速连续的控件变化，拖动滑块释放时则立即发送最终值。
 void MainWindow::connectControls()
 {
     const auto changed = [this] { if (m_sendTimer) m_sendTimer->start(); };
-    const auto resumeManualPosition = [this] {
-        if (!m_demoPrepared) return;
-        m_demoPrepared = false;
-        m_demoStatus->setText("待开始");
-    };
-    const auto pairChanged = [this, changed, resumeManualPosition] {
-        resumeManualPosition();
-        updateStartupStatus();
-        changed();
-    };
-    connect(m_targetCraft, qOverload<int>(&QComboBox::currentIndexChanged), this, pairChanged);
-    connect(m_chaserCraft, qOverload<int>(&QComboBox::currentIndexChanged), this, pairChanged);
+    connect(m_dynamicsSpeed, qOverload<double>(&QDoubleSpinBox::valueChanged), this, changed);
     connect(m_manualSolarDiagnostic, &QCheckBox::toggled, this, &MainWindow::sendState);
     connect(m_manualSolarRole, &QComboBox::currentIndexChanged, this, &MainWindow::sendState);
     connect(m_raySensor, &QComboBox::currentIndexChanged, this, changed);
     connect(m_showRays, &QCheckBox::toggled, this, changed);
-    connect(m_distanceSlider, &QSlider::valueChanged, this, [this, changed, resumeManualPosition](int value) {
-        resumeManualPosition();
-        m_distanceLabel->setText(QString::number(value / 10.0, 'f', 1) + " m");
-        changed();
-    });
-    for (int i = 0; i < m_jointSliders.size(); ++i) {
-        connect(m_jointSliders[i], &QSlider::valueChanged, this, [this, i, changed](int value) {
-            m_jointValueLabels[i]->setText(QString::number(value) + "°");
-            changed();
-        });
-    }
     connect(m_solarSlider, &QSlider::valueChanged, this, changed);
     connect(m_solarSlider, &QSlider::sliderReleased, this, [this] {
         m_sendTimer->stop();
@@ -397,16 +352,6 @@ void MainWindow::connectControls()
     for (auto *spin : m_orbitSpins)
         connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, changed);
     connect(m_epochUtcEdit, &QDateTimeEdit::dateTimeChanged, this, changed);
-    connect(m_attitudeMode, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, changed](int) {
-        const bool eulerSelected = m_attitudeMode->currentData().toString() == "euler";
-        m_eulerAttitudeEditor->setVisible(eulerSelected);
-        m_quaternionAttitudeEditor->setVisible(!eulerSelected);
-        changed();
-    });
-    for (auto *spin : m_attitudeSpins)
-        connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, changed);
-    for (auto *spin : m_quaternionSpins)
-        connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, changed);
     connect(m_sensorCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, changed] {
         editSelectedSensor();
         changed();
@@ -425,6 +370,9 @@ void MainWindow::connectControls()
     connect(m_warningEnabled, &QCheckBox::toggled, this, sensorChanged);
 }
 
+// 把 Unity 的 telemetry JSON 转成 Qt 表格文字、颜色和悬停提示，不在这里重新做空间射线计算。
+// 只显示当前 demoRunId 对应的轮次；可见率使用可见点数/总目标点数，未来遮挡预警则只在演示时标出。
+// 显示换算交给 TelemetryDisplay::row；当前光照比例在那里乘 100 变百分数，底层 JSON 仍保存 0 到 1 的比例。
 void MainWindow::showTelemetry(const QJsonObject &message)
 {
     const QJsonArray sensors = message.value("sensors").toArray();
@@ -432,16 +380,59 @@ void MainWindow::showTelemetry(const QJsonObject &message)
     m_telemetryTable->setRowCount(sensors.size());
     int row = 0;
     bool anyWarning = false;
-    const double demoTime = message.value("demoTimeSec").toDouble();
-    if (m_demoActive && message.value("demoDocking").toBool()) {
-        if (message.value("demoFinished").toBool()) {
-            m_demoStatus->setText(QString("%1 · 位置误差 %2 m · 轴向误差 %3°")
-                .arg(message.value("dockingAligned").toBool() ? "已对准并停稳" : "已到终点，误差超限")
-                .arg(message.value("dockingPositionErrorM").toDouble(), 0, 'f', 3)
-                .arg(message.value("dockingAngleErrorDeg").toDouble(), 0, 'f', 2));
-        } else {
-            m_demoStatus->setText(QString("正在接近 · 仿真 %1 s").arg(demoTime, 0, 'f', 1));
+    const QJsonObject native = message.value("dynamics").toObject();
+    if (native.value("jointAnglesRad").toArray().size() == 7) {
+        const auto meters = [&native](const QString &key) {
+            return QString::number(native.value(key).toDouble(), 'f', 3) + " m";
+        };
+        m_distanceLabel->setText(meters("portDistanceM"));
+        m_centerDistanceLabel->setText(meters("centerDistanceM"));
+        m_axialGapLabel->setText(meters("axialGapM"));
+        m_toolDistanceLabel->setText(meters("toolDistanceM"));
+        const QJsonArray joints = message.value("jointsDeg").toArray();
+        for (int i = 0; i < m_jointValueLabels.size() && i < joints.size(); ++i)
+            m_jointValueLabels[i]->setText(QString::number(joints[i].toDouble(), 'f', 1) + "°");
+        const auto attitudeText = [&native](const QString &name) {
+            const auto rotation = native.value(name).toObject().value("rotation").toObject();
+            QStringList values;
+            for (const auto &axis : {"w", "x", "y", "z"})
+                values.append(QString::number(rotation.value(axis).toDouble(), 'f', 5));
+            return values.join("  ");
+        };
+        m_stationAttitude->setText(attitudeText("stationCenter"));
+        m_visitorAttitude->setText(attitudeText("visitorCenter"));
+        const int mode = native.value("mode").toInt();
+        const auto events = native.value("eventTimesSec").toArray();
+        const QStringList eventNames = {"工具接触", "机械臂抓捕", "对接口二次接触", "已发出锁紧请求", "端口锁紧", "已分离"};
+        while (m_dynamicsEventsShown < events.size() && m_dynamicsEventsShown < eventNames.size()) {
+            const double eventTime = events[m_dynamicsEventsShown].toDouble(-1);
+            if (eventTime < 0) break;
+            startupEvent("dynamics-event", QString("%1（仿真 %2 s）")
+                .arg(eventNames[m_dynamicsEventsShown]).arg(eventTime, 0, 'f', 3));
+            ++m_dynamicsEventsShown;
         }
+        QString phase;
+        switch (mode) {
+        case 0: phase = "目标主动接近"; break;
+        case 1: phase = "工具接触"; break;
+        case 2: phase = "端口锁紧"; break;
+        case 3: phase = events.size() == 6 && events[2].toDouble() >= 0 ? "二次碰撞 · 端口接触" : "己方机械臂抓捕搬运"; break;
+        case 4: phase = "已分离"; break;
+        default: phase = "等待工况"; break;
+        }
+        const double demoTime = native.value("timeSec").toDouble();
+        const QString status = message.value("demoFinished").toBool() ? "播放完成"
+            : m_demoActive ? "播放中" : demoTime > 0 ? "已暂停" : "待播放";
+        m_demoStatus->setText(QString("%1 · %2 · %3 s").arg(status, phase).arg(demoTime, 0, 'f', 2));
+        if (message.value("demoFinished").toBool() && !m_demoFinished) {
+            m_demoFinished = true;
+            m_demoActive = false;
+            m_demoButton->setText("重播");
+            startupEvent("dynamics-finished");
+            sendState();
+        }
+    } else if (!message.value("dynamicsError").toString().isEmpty()) {
+        m_demoStatus->setText(message.value("dynamicsError").toString());
     }
     const auto describeWings = [&](const QString &role, bool &hasWings) {
         QStringList values;
@@ -458,7 +449,7 @@ void MainWindow::showTelemetry(const QJsonObject &message)
     };
     const QString targetWings = describeWings("target", m_targetHasWings);
     const QString chaserWings = describeWings("chaser", m_chaserHasWings);
-    m_wingStatus->setText(QString("目标器 %1\n追踪器 %2").arg(targetWings, chaserWings));
+    m_wingStatus->setText(QString("目标器 %1\n己方 %2").arg(targetWings, chaserWings));
     updateSolarControls();
     for (const auto &entry : sensors) {
         const QJsonObject sensor = entry.toObject();
@@ -497,6 +488,8 @@ void MainWindow::showTelemetry(const QJsonObject &message)
     m_sensorSummary->setStyleSheet(anyWarning ? "color:#b42318;font-weight:600;" : "color:#16845b;");
 }
 
+// 根据 Unity 回来的翼信息启用或解释手动太阳翼滑块。
+// 这是 Qt 界面状态更新，不负责算自动对日角度；自动角度在 Unity 的 SpatialRuntime 中更新。
 void MainWindow::updateSolarControls()
 {
     const QString role = m_manualSolarRole->currentData().toString();

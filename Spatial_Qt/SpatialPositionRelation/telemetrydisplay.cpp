@@ -43,7 +43,7 @@ QStringList TelemetryDisplay::headers()
 
 QStringList TelemetryDisplay::headerHelp()
 {
-    return {"当前追踪航天器的敏感器", "仅判断目标采样点的几何入场。全部、部分、出场分别对应全部、部分、零个点落入视锥。",
+    return {"己方航天器的敏感器", "仅判断目标采样点的几何入场。全部、部分、出场分别对应全部、部分、零个点落入视锥。",
         "对入场点发出视线并判断是否被结构遮挡。", "演示轨迹上的预计遮挡时间段，单位为仿真秒。",
         "入场且未被遮挡的点数 ÷ 全部目标点数。CRDS 使用对接标志采样，电视相机使用目标表面或指定特征采样。",
         "目标估算投影面积比例。第一个值仅判断视场，第二个值扣除遮挡。",
@@ -51,6 +51,8 @@ QStringList TelemetryDisplay::headerHelp()
         "按实际命中碰撞件及其航天器实例分组。己方为本行敏感器所属航天器。鼠标悬停可看完整列表。", "当前几何受光或遮挡的调整建议。"};
 }
 
+// 按 Unity 给的 illuminationReason 字符串生成对应的悬停说明。
+// 这里只翻译原因码，不根据角度或遮挡重新推导原因。
 QString TelemetryDisplay::illuminationHelp(const QJsonObject &sensor)
 {
     const auto reason = sensor.value("illuminationReason").toString();
@@ -62,6 +64,9 @@ QString TelemetryDisplay::illuminationHelp(const QJsonObject &sensor)
     return {};
 }
 
+// 把 Unity 给出的单传感器遥测字段格式化成表格的一行中文，不改变计算值。
+// visible/total 显示为点数比，面积和归一化光照比例乘 100 显示百分数；夹角保留角度字段原单位。
+// 字段不是 JSON 数值时显示“无数据”；预测字段还受 predicting 开关限制。
 QStringList TelemetryDisplay::row(const QJsonObject &sensor, const QString &name, const QString &chaserCraftId, bool predicting)
 {
     const auto status = sensor.value("status").toString();

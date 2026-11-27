@@ -5,6 +5,10 @@ using UnityEngine;
 using Object = UnityEngine.Object;
 
 // Uses Unity's IMGUI dispatcher and the production OnGUI handler to test the actual camera transform.
+/// <summary>
+/// 这是项目已有的编辑器相机手势检查窗口，会把编辑器事件送给总览处理代码并比较相机位姿。
+/// 下方通过反射按字符串名称访问私有方法和字段；这是从类型获取成员信息的机制。
+/// </summary>
 public sealed class SpatialCameraGestureSelfTest : EditorWindow
 {
     private const BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;

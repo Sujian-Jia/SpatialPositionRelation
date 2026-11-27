@@ -35,7 +35,7 @@ internal sealed class SpatialOverviewLabels
             if (first.Overlaps(controls) || second.Overlaps(controls)) first.y = second.y = controls.yMax + 5;
         }
         DrawRole(first, firstTip, "目标航天器", new Color(0.54f, 0.93f, 1f), style);
-        DrawRole(second, secondTip, "追踪航天器", new Color(0.82f, 1f, 0.63f), style);
+        DrawRole(second, secondTip, "己方航天器", new Color(0.82f, 1f, 0.63f), style);
         if (Project(camera, sun, out Vector2 solarPixel) && viewport.Contains(solarPixel) && !controls.Contains(solarPixel))
         {
             GUI.color = new Color(1f, 0.83f, 0.52f);
@@ -54,6 +54,10 @@ internal sealed class SpatialOverviewLabels
         }
     }
 
+    /// <summary>
+    /// 把空间里一个点投到总览像素位置，判断它是否在相机近平面前方的可绘制一侧。
+    /// WorldToScreenPoint 的屏幕 Y 随向上增加，GUI 位置从顶部向下量，所以用屏高减去屏幕 Y。
+    /// </summary>
     private static bool Project(Camera camera, Vector3 world, out Vector2 pixel)
     {
         Vector3 screen = camera.WorldToScreenPoint(world);
@@ -61,6 +65,11 @@ internal sealed class SpatialOverviewLabels
         return screen.z > camera.nearClipPlane;
     }
 
+    /// <summary>
+    /// 用模型包围盒的屏幕投影定位标签，尽量贴着模型上方又避开界面按钮。
+    /// 三位位掩码 1、2、4 各控制一个轴偏移的正负，组合成 8 个角；投影后最小的 GUI Y 对应最高点。
+    /// 没有可用部件、面板过窄或包围盒中心不在总览区时返回默认矩形。
+    /// </summary>
     private static Rect Place(Camera camera, Rect viewport, Rect controls, Renderer[] parts, out Vector2 tip)
     {
         tip = default;

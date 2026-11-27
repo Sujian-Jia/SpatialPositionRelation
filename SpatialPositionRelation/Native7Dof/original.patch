@@ -1,0 +1,253 @@
+--- a/main.cpp
++++ b/main.cpp
+@@ -1,8 +1,5 @@
+ #include "DockingDynamics.hpp"
+-#include "Controller.hpp"
+-#include "ExternalContactDemo.hpp"
+-#include "ExternalPlumeDemo.hpp"
+-#include "ExternalSeparationDemo.hpp"
++#include "DemoSession.hpp"
+ #include <algorithm>
+ #include <cmath>
+ #include <cstdlib>
+@@ -13,32 +10,9 @@
+ #include <stdexcept>
+ #include <string>
+ using namespace docking;
++using namespace docking::demo;
+ 
+ namespace {
+-struct SimulationSettings {
+-  DemoScenario scenario=DemoScenario::StationPort;
+-  double durationSeconds=36.0;
+-  double integrationStep=0.001;    // RK4 internal step; reduce for convergence.
+-  double outputStep=0.02;         // CSV sample period, independent of internal RK4 step.
+-  double holdSeconds=6.0;
+-  std::string csvFile="results_station.csv";
+-  bool enableCollision=true,enablePlume=true,enableSeparation=true;
+-  bool quiet=false,selfTest=false,probe=false;
+-  StationLockModel lockModel=StationLockModel::RigidComposite; // one actual spacecraft when latched
+-
+-  // All vectors below are configurable in main(). Local port/grapple coordinates
+-  // are BODY-FRAME offsets (not absolute world points).
+-  Vec3 stationInitialPosition,visitorInitialPosition,visitorInitialVelocity;
+-  Vec4 stationInitialQuaternion,visitorInitialQuaternion;
+-  Vec3 stationPort,visitorPort,stationPortNormal,visitorGrapple;
+-  Vec3 armMount,panelLeftMount,panelRightMount;
+-  bool autoVisitorStartNearArm=true;  // If arm scenario, compute incoming trajectory from tool pose.
+-  double armApproachStandoff=0.33,armApproachSpeed=0.06;
+-  ContactModelSettings collision;
+-  SeparationSettings separation;
+-  ControllerSettings controller;
+-};
+-
+ Vec3 parseVector(int& i,int argc,char** argv,const std::string& name){
+  if(i+3>=argc)throw std::runtime_error(name+" needs THREE numbers");
+  const double x=std::stod(argv[++i]);
+@@ -115,43 +89,6 @@
+    if(!setCSV)cfg.csvFile=(cfg.scenario==DemoScenario::ArmCapture?
+                                "results_arm.csv":"results_station.csv");
+  }
+-}
+-
+-DockParameters makeParameters(const SimulationSettings& cfg){
+- DockParameters p=MakeDefaultParameters(); // preserves the seven-joint, new-FE and panel data.
+- p.lockModel=cfg.lockModel;
+- p.outputStep=cfg.outputStep;
+- p.rk4Substeps=1; // main controls the actual internal RK4 steps.
+- p.initialStationPosition=cfg.stationInitialPosition;
+- p.initialStationQuat=cfg.stationInitialQuaternion;
+- p.initialVisitorPosition=cfg.visitorInitialPosition;
+- p.initialVisitorVelocity=cfg.visitorInitialVelocity;
+- p.initialVisitorQuat=cfg.visitorInitialQuaternion;
+- p.armMount=cfg.armMount;
+- p.panelLeftMount=cfg.panelLeftMount;
+- p.panelRightMount=cfg.panelRightMount;
+- p.portStation=cfg.stationPort;
+- p.portVisitor=cfg.visitorPort;
+- p.stationPortNormalLocal=cfg.stationPortNormal.normalized();
+- p.visitorGrapple=cfg.visitorGrapple;
+- p.stationContactSkin=cfg.collision.stationSkin;
+- p.armContactSkin=cfg.collision.armSkin;
+- p.stationContactLateralTol=cfg.collision.stationLateralTolerance;
+- p.armContactLateralTol=cfg.collision.armLateralTolerance;
+- if(cfg.scenario==DemoScenario::ArmCapture){
+-   p.initialJointAngles=cfg.controller.qCapture;
+-   if(cfg.autoVisitorStartNearArm){
+-     // Optional example auto-placement; switch off to use the explicitly set
+-     // visitorInitialPosition and visitorInitialVelocity in main().
+-     DockingDynamics toolSolver(p);
+-     const ToolPose T=toolSolver.ArmTool(toolSolver.GetState());
+-     const Vec3 normal=T.rotation*Vec3::UnitZ();
+-     const Mat3 RV=DockingDynamics::QuaternionToRotation(p.initialVisitorQuat);
+-     p.initialVisitorPosition=T.position+cfg.armApproachStandoff*normal-RV*p.visitorGrapple;
+-     p.initialVisitorVelocity=-cfg.armApproachSpeed*normal;
+-   }
+- }
+- return p;
+ }
+ 
+ void validateSettings(const SimulationSettings& c){
+@@ -485,57 +422,25 @@
+  std::cout<<"Generated cpp_7dof_probe.csv\n";
+ }
+ void simulate(const SimulationSettings& cfg){
+- DockParameters p=makeParameters(cfg);
+- DockingDynamics model(p);
+- DockingPDController control(cfg.controller);
+- // All loads come from independent caller-owned EXTERNAL modules.
+- ExternalContactDemo collision(cfg.collision);
+- ExternalPlumeDemo plume;
+- ExternalSeparationDemo separator(cfg.separation);
++ Session session(cfg);
++ auto& model=session.model;
++ const auto& in=session.in;
++ const double& t=session.t;
+  std::ofstream f(cfg.csvFile);
+  if(!f)throw std::runtime_error("Cannot open CSV file: "+cfg.csvFile);
+  f<<std::setprecision(13);csvHeader(f);
+- Inputs in;
+  csvRow(f,0.,model.SampleOutputs(in),in);
+- double t=0.,firstLock=-1.,armCapture=-1.,release=-1.;
+- DockMode previous=model.GetMode();
+  int frame=0;
+  while(t<cfg.durationSeconds-1e-12){
+    const double nextOutput=std::min(cfg.durationSeconds,(frame+1)*cfg.outputStep);
+    while(t<nextOutput-1e-12){
+-     // Simulation caller creates three independent physical load inputs and
+-     // sends discrete contact/lock/release signals into the plant.
+-     const State& x=model.GetState();
+-     const DockDiagnostics d=model.Inspect(x);
+-     in=Inputs{};
+-     in.control=control.Calculate(t,x,model.GetMode(),p,cfg.scenario);
+-     if(firstLock>=0 && t>=firstLock+cfg.holdSeconds &&
+-         (model.GetMode()==DockMode::StationLocked||model.GetMode()==DockMode::ArmCaptured))
+-       in.control.requestRelease=true;
+-     if(cfg.enablePlume)plume.Evaluate(t,x,in.loads.plume);
+-     if(cfg.enableCollision)
+-       collision.Evaluate(t,model,x,d,model.GetMode(),cfg.scenario,true,false,in);
+-     else{
+-       in.control.requestContact=false;
+-       in.control.requestLock=false;
+-       in.control.requestArmCapture=false;
+-     }
+-     if(cfg.enableSeparation && model.GetMode()==DockMode::Separated)
+-       separator.Evaluate(model,x,d,in);
+-     const double dt=std::min(cfg.integrationStep,nextOutput-t);
+-     model.AdvanceFast(in,dt);
+-     t+=dt;
+-     if(model.GetMode()!=previous){
+-       collision.RegisterModeChange(t,model.GetMode());
+-       if(!cfg.quiet)
+-         std::cout<<"t="<<std::fixed<<std::setprecision(4)<<t
+-                  <<" mode "<<int(previous)<<" -> "<<int(model.GetMode())
+-                  <<" gap="<<model.Inspect(model.GetState()).axialGap<<'\n';
+-       if(model.GetMode()==DockMode::ArmCaptured)armCapture=t;
+-       if(model.GetMode()==DockMode::StationLocked)firstLock=t;
+-       if(model.GetMode()==DockMode::Separated)release=t;
+-       previous=model.GetMode();
+-     }
++     const auto previous=model.GetMode();
++     const double dt=std::min(cfg.integrationStep,nextOutput-t);
++     session.Advance(dt,dt);
++     if(!cfg.quiet && model.GetMode()!=previous)
++       std::cout<<"t="<<std::fixed<<std::setprecision(4)<<t
++                <<" mode "<<int(previous)<<" -> "<<int(model.GetMode())
++                <<" gap="<<model.Inspect(model.GetState()).axialGap<<'\n';
+    }
+    Outputs output=model.SampleOutputs(in); // one fresh acceleration per output frame
+    csvRow(f,t,output,in);
+@@ -548,11 +453,11 @@
+  const DockDiagnostics d=model.Inspect(model.GetState());
+  const double requestedAt=(cfg.scenario==DemoScenario::ArmCapture?
+      cfg.controller.armStationLockRequestTime:cfg.controller.lockRequestTime);
+- const auto& e=collision.Events();
++ const auto& e=session.collision.Events();
+  std::cout<<std::setprecision(6)
+   <<"DONE "<<(cfg.scenario==DemoScenario::StationPort?"station":"arm")
+-  <<" duration="<<t<<" firstArmCapture="<<armCapture
+-  <<" lockSignalTime="<<requestedAt<<" stationLock="<<firstLock<<" release="<<release
++  <<" duration="<<t<<" firstArmCapture="<<session.armCapture
++  <<" lockSignalTime="<<requestedAt<<" stationLock="<<session.firstLock<<" release="<<session.release
+   <<" finalMode="<<int(model.GetMode())<<" gap="<<d.axialGap
+   <<" armFirstContact="<<e.firstArmTouch<<" stationFirstContact="<<e.firstStationTouch
+   <<" peakArmN="<<e.peakArmForce<<" peakStationN="<<e.peakStationForce
+@@ -566,52 +471,7 @@
+    // ================================================================
+    // SINGLE MAIN.CPP CONFIGURATION AREA (edit these values directly)
+    // ================================================================
+-   SimulationSettings cfg;
+-   cfg.scenario=DemoScenario::StationPort; 
+-
+-   //cfg.scenario = DemoScenario::ArmCapture;// change to ArmCapture for arm assist
+-   cfg.integrationStep=0.001;  // s, RK4 integration (use 0.0005 for convergence check)
+-   cfg.outputStep=0.02;       // s, CSV sampling period
+-   cfg.durationSeconds=(cfg.scenario==DemoScenario::ArmCapture?80.:36.); // s
+-   cfg.holdSeconds=6.0;       // locked dwell time before external release
+-   cfg.lockModel=StationLockModel::RigidComposite; // one combined rigid spacecraft on latch
+-   // Edit HERE to choose the EARLIEST station-port lock signal time (seconds).
+-   // The existing physical contact/geometry/speed gates are preserved; the
+-   // actual latch happens immediately once a VALID signal is accepted.
+-   // Direct-port docking scenario:
+-   cfg.controller.lockRequestTime=18.20;
+-   // 7-DOF arm-assisted scenario (the selected default below):
+-   cfg.controller.armStationLockRequestTime=58.00;
+-   cfg.csvFile=(cfg.scenario==DemoScenario::ArmCapture?
+-                 "results_arm.csv":"results_station.csv");
+-
+-   // Inertial initial states (m, m/s, quaternion in [w,x,y,z] order).
+-   cfg.stationInitialPosition=Vec3(0,0,0);
+-   cfg.stationInitialQuaternion=Vec4(1,0,0,0);
+-   cfg.visitorInitialPosition=Vec3(4.3,0,0);
+-   cfg.visitorInitialVelocity=Vec3(-0.1,0,0);
+-   cfg.visitorInitialQuaternion=Vec4(1,0,0,0);
+-
+-   // BODY-FRAME docking hardware positions; changing the spacecraft layout
+-   // requires editing only these geometry values, NOT DockingDynamics.cpp.
+-   cfg.stationPort=Vec3(1.25,0,0);
+-   cfg.visitorPort=Vec3(-1.25,0,0);
+-   cfg.stationPortNormal=Vec3(1,0,0); // station docking face outward normal
+-   cfg.visitorGrapple=Vec3(0,0,1);
+-   cfg.armMount=Vec3(1,0,2);
+-   cfg.panelLeftMount=Vec3(0,2,-2);
+-   cfg.panelRightMount=Vec3(0,-2,-2);
+-
+-   // Arm scenario: TRUE keeps incoming visitor on a straight line aimed at
+-   // the nominal tool. FALSE uses the manual visitor positions above.
+-   cfg.autoVisitorStartNearArm=true;
+-   cfg.armApproachStandoff=0.33;
+-   cfg.armApproachSpeed=0.060;
+-
+-   // Independent EXTERNAL load switches, not a part of dynamics equations.
+-   cfg.enableCollision=true;
+-   cfg.enablePlume=true;
+-   cfg.enableSeparation=true;
++   SimulationSettings cfg=DefaultSettings();
+ 
+    // Can override main settings without rebuilding; run --help for options.
+    parseCommandLine(cfg,argc,argv);
+--- a/DockingDynamics.hpp
++++ b/DockingDynamics.hpp
+@@ -144,6 +144,7 @@
+  DockDiagnostics Inspect(const State&)const;Outputs ReadOutputs(const Inputs& in=Inputs{})const;
+  PortReferenceMotion ReadPortReferenceMotion()const;
+  ToolPose ArmTool(const State&)const;
++ std::array<ToolPose,7> ArmJointFrames(const State&)const;
+  static Mat3 Skew(const Vec3&);static Mat3 ExpSO3(const Vec3&);
+  static Mat3 LeftJacobianSO3(const Vec3&);static Mat3 QuaternionToRotation(const Vec4&);
+  static Vec4 RotationToQuaternion(const Mat3&);
+--- a/DockingDynamics.cpp
++++ b/DockingDynamics.cpp
+@@ -268,6 +268,12 @@
+  const Vec3 eArm(.5*(Ra(2,1)-Ra(1,2)),.5*(Ra(0,2)-Ra(2,0)),.5*(Ra(1,0)-Ra(0,1)));
+  G.ea<<gp-p,eArm;G.armPos=(gp-p).norm();
+  return G;
++}
++std::array<ToolPose,7> DockingDynamics::ArmJointFrames(const State& s)const{
++ const Geometry g=GeometryAt(s.q);
++ std::array<ToolPose,7> result;
++ for(int i=0;i<7;++i)result[i]={g.parts[i+1].p,g.parts[i+1].R};
++ return result;
+ }
+ ToolPose DockingDynamics::ArmTool(const State& s)const{return GeometryAt(s.q).tool;}
+ 

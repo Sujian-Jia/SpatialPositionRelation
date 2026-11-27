@@ -34,6 +34,10 @@
 #include <windows.h>
 #endif
 
+// 由 Qt 启动 Unity 可执行程序，并通过启动参数传端口、实例令牌和要嵌入的父窗口句柄。
+// Qt 用 QProcess 创建独立进程（独立程序实例）；本地临时端口由 QTcpServer 向系统申请。
+// HWND/parentHWND 是 Windows 窗口句柄标识；它让 Player 作为子窗口嵌入 Qt 视口，不是图像复制。
+// 端口和一次性 instanceToken 随 -spatialPort、-spatialToken 传递，供 TCP 连接与握手时核对。
 void MainWindow::startUnity()
 {
     if (m_closing || m_unityProcess->state() != QProcess::NotRunning) return;
@@ -104,6 +108,8 @@ void MainWindow::startUnity()
     updateStartupStatus();
 }
 
+// 定时尝试连接刚启动的 Unity 进程，并等待窗口、身份握手、首帧和首条遥测都出现。
+// LocalHost 表示本机；启动 120000 毫秒仍不齐备就报超时，连接检查定时器每 800 毫秒触发。
 void MainWindow::tryConnectUnity()
 {
     if (m_closing || m_startupFailed) return;
@@ -129,13 +135,18 @@ void MainWindow::startupEvent(const QString &stage, const QString &details)
         {"window-embedded", "Unity 画面已嵌入"}, {"application-ready", "Qt 与 Unity 通信已就绪"},
         {"first-frame", "三维画面已显示"}, {"first-telemetry", "已收到首批敏感器计算结果"},
         {"tcp-disconnected", "Unity 通信连接已断开"}, {"startup-failed", "三维场景启动未完成，请查看运行状态"},
-        {"unity-exited", "Unity 已退出"}, {"viewport-resize", "三维画面尺寸已调整"}
+        {"unity-exited", "Unity 已退出"}, {"viewport-resize", "三维画面尺寸已调整"},
+        {"dynamics-play", "开始或继续 7DOF 演示"}, {"dynamics-pause", "暂停 7DOF 演示"},
+        {"dynamics-reset", "7DOF 演示已请求复位"}, {"dynamics-event", "7DOF 工况"},
+        {"dynamics-finished", "7DOF 演示播放完成"}
     };
     const QString description = userEvents.value(stage);
     if (!m_operatorLog.isEmpty() && !description.isEmpty()) {
         const QString localTime = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
-        const QString size = stage == "viewport-resize" ? QString("（%1 像素）").arg(details) : QString();
-        RuntimeData::appendLog(m_operatorLog, QString("%1  %2%3\n").arg(localTime, description, size).toUtf8());
+        QString context;
+        if (stage == "viewport-resize") context = QString("（%1 像素）").arg(details);
+        if (stage == "dynamics-event") context = QString(" · %1").arg(details);
+        RuntimeData::appendLog(m_operatorLog, QString("%1  %2%3\n").arg(localTime, description, context).toUtf8());
     }
 }
 
@@ -143,8 +154,8 @@ void MainWindow::updateStartupStatus()
 {
     if (m_startupFailed || m_closing) return;
     const bool ready = m_unityWindowHandle && m_handshake && m_firstFrame && m_firstTelemetry;
-    m_demoButton->setEnabled(ready && !m_demoActive);
-    m_demoButton->setToolTip("使用空间站与载人飞船参考组合演示，复位后可再次开始");
+    m_demoButton->setEnabled(ready);
+    m_demoButton->setToolTip("播放或暂停 7DOF 工况，复位返回起始状态");
     const QString stage = ready ? "Unity 就绪 · TCP 已连接" :
         !m_handshake ? (m_unityWindowHandle ? "等待 Unity 应用握手" : "Unity 正在加载场景") :
         !m_firstFrame ? "等待 Unity 首帧" : !m_unityWindowHandle ? "等待嵌入 Unity 窗口" : "等待传感器遥测";
@@ -173,6 +184,9 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     return QMainWindow::eventFilter(watched, event);
 }
 
+// 跟随 Qt 视口大小找到并调整 Unity 子窗口，只有 Windows 构建执行窗口句柄操作。
+// GetClientRect 取得不含标题栏的客户区像素尺寸；SetWindowPos 调窗口尺寸，窗口外框尺寸需补回边框差。
+// 部分 GUI API 用 HWND 表示窗口，成员存整数句柄时经 reinterpret_cast 转回指针式句柄。
 void MainWindow::resizeUnityChild()
 {
 #ifdef Q_OS_WIN
@@ -221,6 +235,8 @@ void MainWindow::resizeUnityChild()
 #endif
 }
 
+// 用户关窗而 Unity 仍运行时先暂缓 Qt 退出，转入有序关停，避免留下子进程。
+// 这是 Qt 关闭事件回调；event->ignore() 暂不接受本次关闭，子进程结束后 finishUnityCleanup 再关闭窗口。
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     if (m_unityProcess->state() == QProcess::NotRunning) {
@@ -236,6 +252,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
     stopUnity();
 }
 
+// 先停定时器，再通过 SPR/1 shutdown 请求结束正确的 Unity 实例，并在超时后强制清理。
+// 握手完成时发协议消息和 instanceToken；未完成则 terminate 子进程。
+// 1800 毫秒后仅在同一令牌的进程还活着时 kill，防止过时定时器误杀重启后的新实例。
 void MainWindow::stopUnity()
 {
     m_connectTimer->stop();
@@ -273,6 +292,8 @@ void MainWindow::appendProcessLog(const QByteArray &data)
     RuntimeData::appendLog(m_processLog, data);
 }
 
+// 为本次运行创建带文件锁的一组日志路径，防止两次程序实例同时写同一会话。
+// QLockFile 是 Qt 的文件锁；日志文件名含 UTC 时间和进程 ID，再交给 RuntimeData 清理旧日志。
 bool MainWindow::prepareDataSession(const QString &root)
 {
     if (root.isEmpty()) return false;

@@ -5,6 +5,10 @@ using UnityEngine;
 
 public static class SpatialAlgorithmSelfTest
 {
+    /// <summary>
+    /// 这是项目已有的编辑器自检入口，用临时传感器、目标和遮挡物调用实际几何方法。
+    /// MenuItem 使它出现在 Unity 编辑器菜单；正常运行时的调用入口在 SpatialSimulationBase。
+    /// </summary>
     [MenuItem("Spatial Demo/Run Occlusion Algorithm Checks")]
     public static void RunBatch()
     {
@@ -65,8 +69,8 @@ public static class SpatialAlgorithmSelfTest
 
             VerifyProjectedTargetArea(sensor, targetObject);
             VerifyLightWarning(sensor, targetObject);
-            VerifyOrbitAndTrajectory();
-            Debug.Log("SPATIAL_ALGORITHM_TESTS_OK cases=26 fov=pass visible=pass targetExclusion=pass targetArea=pass partialBlock=pass fullBlock=pass identity=pass orbit=pass trajectory=pass lightWarning=pass sunOcclusion=pass jointRecommendation=pass");
+            VerifyOrbitAndCoordinateAdapter();
+            Debug.Log("SPATIAL_ALGORITHM_TESTS_OK cases=26 fov=pass visible=pass targetExclusion=pass targetArea=pass partialBlock=pass fullBlock=pass identity=pass orbit=pass axisAdapter=pass lightWarning=pass sunOcclusion=pass jointRecommendation=pass");
         }
         finally
         {
@@ -188,7 +192,7 @@ public static class SpatialAlgorithmSelfTest
         }
     }
 
-    private static void VerifyOrbitAndTrajectory()
+    private static void VerifyOrbitAndCoordinateAdapter()
     {
         GameObject root = new GameObject("AlgorithmTestSimulation");
         try
@@ -219,14 +223,14 @@ public static class SpatialAlgorithmSelfTest
             Require(Mathf.Abs(sun.magnitude - 1) < 0.001f && Vector3.Distance(sun, expectedSun) < 0.01f,
                     "J2000SunDirectionUnity", sun.ToString("F3"));
 
-            MethodInfo trajectoryMethod = typeof(SpatialSimulationBase).GetMethod("SampleTrajectory", flags);
-            SpatialTrajectoryPoint[] points = {
-                new SpatialTrajectoryPoint { tSec = 0, relativePositionM = new[] { 0f, 0f, 0f } },
-                new SpatialTrajectoryPoint { tSec = 10, relativePositionM = new[] { 10f, 20f, 30f } }
-            };
-            Vector3 midpoint = (Vector3)trajectoryMethod.Invoke(simulation, new object[] { points, 5f });
-            Require(Vector3.Distance(midpoint, new Vector3(5, 10, 15)) < 0.001f,
-                    "TrajectoryLinearInterpolation", midpoint.ToString("F3"));
+            double r = Math.Sqrt(0.5);
+            Quaternion reflected = SpatialDynamicsAdapter.Rotation(new[] { r, r, 0, 0 }, 0);
+            Vector3 actual = reflected * SpatialDynamicsAdapter.Polar(new[] { 2.0, -3, 4 }, 0);
+            Vector3 expected = SpatialDynamicsAdapter.Polar(new[] { 2.0, -4, -3 }, 0);
+            Vector3 ax = SpatialDynamicsAdapter.Axial(new[] { 1.0, 0, 0 }, 0);
+            Vector3 byCross = Vector3.Cross(Vector3.up, -Vector3.forward);
+            Require(Vector3.Distance(actual, expected) < 1e-5f && Vector3.Distance(ax, byCross) < 1e-5f,
+                    "DynamicsReflectionRotationAndAxialAxis", actual.ToString("F3"));
         }
         finally
         {
@@ -253,3 +257,4 @@ public static class SpatialAlgorithmSelfTest
         Debug.Log("SPATIAL_ALGORITHM_CASE_PASS " + name + " actual=" + actual);
     }
 }
+

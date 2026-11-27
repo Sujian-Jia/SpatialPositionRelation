@@ -28,6 +28,8 @@ class QTcpSocket;
 class QTimer;
 class QWidget;
 
+// 这是 Qt 主控窗口的类声明；真正的界面创建和消息处理实现在分开的 .cpp 文件。
+// public 是外部可调用部分，protected 接收窗口事件，private 放内部控件和运行状态。
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -44,6 +46,7 @@ private:
     void buildUi();
     void loadConfig();
     void connectControls();
+    // 启动 Unity 子进程并准备 Qt 与 Unity 的本机连接。
     void startUnity();
     void stopUnity();
     void showRunStatus();
@@ -58,7 +61,9 @@ private:
     void startupFailure(const QString &reason);
     void finishUnityCleanup();
     void sendState();
+    // 读取界面当前值并拼成一份状态快照。
     QJsonObject currentState() const;
+    // 处理 Unity 回来的一整行 JSON。
     void receiveMessage(const QByteArray &line);
     void showTelemetry(const QJsonObject &message);
     void updateSolarControls();
@@ -105,6 +110,12 @@ private:
     bool m_closing = false;
     bool m_startupFailed = false;
     QLabel *m_distanceLabel = nullptr;
+    QLabel *m_centerDistanceLabel = nullptr;
+    QLabel *m_axialGapLabel = nullptr;
+    QLabel *m_toolDistanceLabel = nullptr;
+    QLabel *m_stationAttitude = nullptr;
+    QLabel *m_visitorAttitude = nullptr;
+    QDoubleSpinBox *m_dynamicsSpeed = nullptr;
     QLabel *m_sensorSummary = nullptr;
     QTableWidget *m_telemetryTable = nullptr;
     QLabel *m_demoStatus = nullptr;
@@ -120,22 +131,14 @@ private:
     QLabel *m_sensorPositionReference = nullptr;
     QJsonObject m_defaultConfig;
     bool m_demoActive = false;
-    bool m_demoPrepared = false;
+    bool m_demoFinished = false;
     int m_demoRunId = 0;
-    QComboBox *m_targetCraft = nullptr;
-    QComboBox *m_chaserCraft = nullptr;
+    int m_dynamicsEventsShown = 0;
     QComboBox *m_sensorCombo = nullptr;
-    QComboBox *m_attitudeMode = nullptr;
-    QSlider *m_distanceSlider = nullptr;
     QSlider *m_solarSlider = nullptr;
-    QVector<QSlider *> m_jointSliders;
     QVector<QLabel *> m_jointValueLabels;
     QVector<QDoubleSpinBox *> m_orbitSpins;
-    QVector<QDoubleSpinBox *> m_attitudeSpins;
-    QVector<QDoubleSpinBox *> m_quaternionSpins;
     QDateTimeEdit *m_epochUtcEdit = nullptr;
-    QWidget *m_eulerAttitudeEditor = nullptr;
-    QWidget *m_quaternionAttitudeEditor = nullptr;
     QDoubleSpinBox *m_fovHorizontal = nullptr;
     QDoubleSpinBox *m_fovVertical = nullptr;
     QVector<QDoubleSpinBox *> m_sensorPositionSpins;

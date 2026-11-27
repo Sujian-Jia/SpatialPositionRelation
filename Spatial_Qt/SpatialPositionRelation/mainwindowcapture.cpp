@@ -41,6 +41,8 @@ void MainWindow::recordFrame()
         requestSensorFrame(m_recordingSensorId, true);
 }
 
+// 用传感器 ID 和请求序号向 Unity 请求一张画面，并登记当前唯一待处理请求。
+// 协议行尾换行；超时定时器按捕获的序号核对，避免旧超时清掉较新的请求状态。
 void MainWindow::requestSensorFrame(const QString &id, bool recording)
 {
     if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState || id.isEmpty()) {
@@ -72,6 +74,9 @@ void MainWindow::requestSensorFrame(const QString &id, bool recording)
     });
 }
 
+// 核对响应协议、序号和传感器 ID 后，把 Unity 返回的 Base64 文本解回 PNG 字节并保存。
+// PNG 文件头用于检查解码后是否像 PNG；记录模式还把同一帧遥测另写入 JSONL（每行一条 JSON）。
+// 此处的 Base64 是二进制转文本的传输包装，不改变像素内容的编码方式。
 void MainWindow::saveSensorFrame(const QJsonObject &message)
 {
     if (message.value("protocol").toString() != "SPR/1" || !m_pendingFrameSequence
@@ -116,6 +121,8 @@ void MainWindow::saveSensorFrame(const QJsonObject &message)
         statusBar()->showMessage("图像已保存，遥测写入失败", 5000);
 }
 
+// 开始或停止逐帧采集；每次采集按传感器请求画面，并将图像和对应遥测写入记录目录。
+// 记录需要可写数据目录及活动 TCP 连接；请求在任一时刻只允许一张待响应帧。
 void MainWindow::toggleFrameRecording()
 {
     if (!m_frameRecording) {

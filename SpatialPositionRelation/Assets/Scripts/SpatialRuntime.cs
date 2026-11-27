@@ -3,10 +3,22 @@ using System.Collections.Generic;
 using System.Globalization;
 using UnityEngine;
 
+/// <summary>
+/// 把原生动力学状态和 Qt 的展示参数应用到现有空间位置计算场景。
+/// MonoBehaviour 是挂在场景对象上的 Unity 组件；场景挂的是具体类 SpatialSimulation，主要实现继承自这里。
+/// </summary>
 public abstract class SpatialSimulationBase : MonoBehaviour
 {
+    /// <summary>
+    /// 给轨道位置和地影判据提供统一的地球尺度：半径用千米，下方引力参数用 km³/s²。
+    /// 这组常量不用于给场景里的航天器模型定尺寸；场景相对位置按米读。
+    /// </summary>
     private const double EarthRadiusKm = 6378.137;
     private const double EarthMu = 398600.4418;
+    /// <summary>
+    /// 把仿真接到场景中已有的通信组件；后面的灯光、模型、相机等引用也由场景配置提供。
+    /// Unity 序列化会保存符合条件的字段及对象引用；这里的引用不是在每一帧重新创建的对象。
+    /// </summary>
     public SpatialTcpBridge tcpBridge;
     public Light sunLight;
     public Transform sunDisc;
@@ -24,6 +36,10 @@ public abstract class SpatialSimulationBase : MonoBehaviour
     private int announcedConnection;
     private string firstFrameUtc;
 
+    /// <summary>
+    /// 让 Qt 知道总览相机何时完成第一帧，而不是把进程启动当作画面就绪。
+    /// 这是渲染后事件的回调，不是每帧执行的 Update；记下 UTC 后解除订阅，未连接时由后续 ready 补报。
+    /// </summary>
     private void RecordFirstFrame(Camera camera)
     {
         if (camera != overviewCamera || firstFrameUtc != null) return;
@@ -36,31 +52,27 @@ public abstract class SpatialSimulationBase : MonoBehaviour
             }));
     }
 
-    protected virtual void OnDestroy() => Camera.onPostRender -= RecordFirstFrame;
+    /// <summary>
+    /// 组件销毁时把自己从相机事件里移除，避免对象已经失效还被回调。
+    /// OnDestroy 是 Unity 生命周期钩子，即引擎在特定阶段自动调用的方法；-= 表示解除订阅。
+    /// </summary>
+    protected virtual void OnDestroy()
+    {
+        Camera.onPostRender -= RecordFirstFrame;
+        dynamics?.Dispose();
+    }
     private float telemetryTimer;
     private long telemetrySequence;
     private Vector3 sunDirection = Vector3.up;
     private Vector3 orbitPositionKm;
     private bool earthShadow;
-    private double trajectoryActivationSec;
-    private bool forecastDirty;
-    private readonly Dictionary<string, TrajectoryOcclusion> trajectoryForecast = new Dictionary<string, TrajectoryOcclusion>();
+    private SpatialDynamicsAdapter dynamics;
+    private string dynamicsError;
 
-    private sealed class TrajectoryOcclusion
-    {
-        public SpatialSensorView view;
-        public Transform feature;
-        public Transform ignoredFeature;
-        public Renderer[] renderers;
-        public Vector3[] fixedSamplePoints;
-        public float windowSec;
-        public float sampleSec;
-        public float blockedSec;
-        public float outOfFovSec;
-        public float peakBlockedRatio;
-        public readonly List<Vector2> occlusionWindows = new List<Vector2>();
-    }
-
+    /// <summary>
+    /// 运行开始时找到通信组件，按 ID 登记两器和传感器，并用默认状态布置场景。
+    /// Start 由 Unity 在首次 Update 前调用；字典只登记每个 ID 的第一项，+= 把首帧处理函数订阅到相机事件。
+    /// </summary>
     protected virtual void Start()
     {
         if (tcpBridge == null) tcpBridge = GetComponent<SpatialTcpBridge>();
@@ -71,11 +83,24 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         foreach (SpatialSensorView sensor in sensorViews)
             if (sensor != null && !sensorById.ContainsKey(sensor.sensorId)) sensorById.Add(sensor.sensorId, sensor);
         Camera.onPostRender += RecordFirstFrame;
+        try {
+            dynamics = new SpatialDynamicsAdapter(craftById[SpatialDynamicsAdapter.StationId], craftById[SpatialDynamicsAdapter.VisitorId]);
+        }
+        catch (Exception exception) {
+            dynamicsError = "7DOF 无法启动：" + exception.Message;
+            Debug.LogError(dynamicsError);
+        }
         UpdateSolarGeometry(0);
         ApplyState();
         Debug.Log("SPATIAL_SCENE_READY utc=" + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
     }
 
+    /// <summary>
+    /// 每帧先收参数，再推进仿真、更新两器和太阳方向，最后按间隔回报结果。
+    /// 主线程每帧最多收 16 条报文。轨道日照使用独立倍率，动力学适配器按墙钟累加固定原生子步。
+    /// 仿真秒以 double 累加、传给部分函数时显式转为 float；遥测另用不受 Unity 时间缩放影响的 unscaledDeltaTime 累计，间隔 0.2 秒。
+    /// Physics.SyncTransforms 把刚改的场景位置和旋转同步给物理系统，供随后射线查询使用。
+    /// </summary>
     protected virtual void Update()
     {
         if (tcpBridge != null)
@@ -95,14 +120,20 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         }
         SpatialOrbit orbit = state.orbit ?? new SpatialOrbit();
         double timeScale = Math.Max(0, orbit.timeScale);
-        if (state.demoDocking && timeScale == 0) timeScale = 60;
-        if (!state.demoPrepared) simulationSeconds += Time.deltaTime * timeScale;
-        if (state.demoDocking && state.trajectory != null)
-            simulationSeconds = Math.Min(simulationSeconds, state.trajectory[state.trajectory.Length - 1].tSec);
+        simulationSeconds += Time.deltaTime * timeScale;
+        if (dynamics != null && dynamicsError == null && state.demoDocking)
+        {
+            try {
+                if (dynamics.Advance(Time.unscaledDeltaTime, state.dynamicsSpeed)) dynamics.Apply();
+            }
+            catch (Exception exception) {
+                dynamicsError = "7DOF 运行中断：" + exception.Message;
+                SendError(dynamicsError);
+            }
+        }
         UpdateSolarGeometry((float)simulationSeconds);
         if (TryGetActiveCraft(out var target, out var chaser))
         {
-            if (state.trajectory != null) ApplyTrajectoryPose(target, chaser, TrajectoryTimeSec());
             ApplySolarTracking(target, sunDirection, true);
             ApplySolarTracking(chaser, sunDirection, false);
             RefreshOverview(target, chaser);
@@ -117,6 +148,11 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// 按协议分流一行 JSON，不让坏状态替换当前仿真输入。
+    /// protocol/type 区分 SPR/1 的 state、captureSensor 和 shutdown；退出另对照实例令牌。
+    /// demoRunId 改变时重建原生会话，播放和暂停继续使用当前会话。
+    /// </summary>
     private void ProcessMessage(string line)
     {
         if (line.StartsWith("__ERROR__", StringComparison.Ordinal))
@@ -144,22 +180,12 @@ public abstract class SpatialSimulationBase : MonoBehaviour
                 SendError("协议版本或消息类型无效");
                 return;
             }
-            if (!IsValidTrajectory(incoming.trajectory))
+            if (!(incoming.dynamicsSpeed >= 0.25 && incoming.dynamicsSpeed <= 16)) incoming.dynamicsSpeed = 1;
+            if (state.demoRunId != incoming.demoRunId && dynamics != null)
             {
-                SendError("轨迹无效。请检查时间递增、有限坐标和采样点数量");
-                return;
+                dynamics.Reset();
+                dynamicsError = null;
             }
-            if (incoming.trajectory == null || incoming.trajectory.Length == 0)
-                incoming.trajectory = null;
-            if ((incoming.demoDocking || incoming.demoPrepared) && incoming.trajectory == null)
-            {
-                SendError("对接演示缺少轨迹");
-                return;
-            }
-            if (state.demoRunId != incoming.demoRunId) simulationSeconds = 0;
-            if (state.trajectoryTimeBase != incoming.trajectoryTimeBase
-                || !SameTrajectory(state.trajectory, incoming.trajectory))
-                trajectoryActivationSec = simulationSeconds;
             state = incoming;
             ApplyState();
         }
@@ -169,6 +195,10 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// 按请求的传感器拍一帧，并原样带回 seq 和 sensorId，方便 Qt 对上请求和响应。
+    /// 没有可拍的相机时返回 error；成功时通过 Base64 把 PNG 的二进制字节表示成 JSON 可携带的文本。
+    /// </summary>
     private void CaptureSensor(SpatialCaptureMessage request)
     {
         var reply = new SpatialCaptureMessage {
@@ -193,6 +223,11 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         tcpBridge?.SendJson(JsonUtility.ToJson(reply));
     }
 
+    /// <summary>
+    /// 临时把相机画面绘进纹理，导出 PNG 后恢复相机原设置。
+    /// 截图长边 640 像素，宽高比取水平和垂直半视场正切之比，两个方向至少 1 像素。
+    /// finally 表示无论成功还是抛出异常都执行，负责恢复相机目标并释放临时纹理。
+    /// </summary>
     private static byte[] RenderSensorPng(SpatialSensorView sensor)
     {
         Camera camera = sensor.sensorCamera;
@@ -230,47 +265,22 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// 按输入摆放目标器、追踪器、机械臂和传感器，给几何计算准备当前场景。
+    /// 两器根节点及七关节取原生样本，再沿用现有敏感器、日照和总览计算。
+    /// 关节角以度绕各关节局部 +Z 叠加到初始旋转。传感器的 mount 选择所属父物体，modelSurface 还要求找到匹配的安装点。
+    /// 没找到有效组合时先回退到默认组合；如果默认组合也缺失就报错，不继续设置。
+    /// </summary>
     private void ApplyState()
     {
-        SpatialPair pair = state.activePair ?? new SpatialPair();
-        if (string.IsNullOrEmpty(pair.target) || string.IsNullOrEmpty(pair.chaser)
-            || !craftById.ContainsKey(pair.target) || !craftById.ContainsKey(pair.chaser)
-            || pair.target == pair.chaser)
-        {
-            pair.target = "SpaceStation";
-            pair.chaser = "CrewVehicle";
-        }
-        state.activePair = pair;
-        if (!craftById.TryGetValue(pair.target, out SpatialCraftAssembly target)
-            || !craftById.TryGetValue(pair.chaser, out SpatialCraftAssembly chaser))
-        {
-            SendError("当前场景缺少有效的 SpaceStation/CrewVehicle 组合");
-            return;
-        }
+        state.activePair = new SpatialPair { target = SpatialDynamicsAdapter.VisitorId, chaser = SpatialDynamicsAdapter.StationId };
+        if (!TryGetActiveCraft(out var target, out var chaser)) return;
         dockingTarget = target.dockingPort;
         foreach (SpatialCraftAssembly assembly in craft) assembly.gameObject.SetActive(assembly == target || assembly == chaser);
         if (embeddedViews != null)
             embeddedViews.ApplySettings(state.overviewMode, state.displaySensorIds);
 
-        target.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
-        float distance = Mathf.Clamp(state.relativeDistanceM, 1, 1000);
-        Vector3 relativePosition = new Vector3(-distance, 0, 0);
-        if (state.trajectory != null)
-            ApplyTrajectoryPose(target, chaser, TrajectoryTimeSec());
-        else
-            chaser.transform.SetPositionAndRotation(target.transform.position + relativePosition, ReadAttitude(state.attitude));
-        forecastDirty = !state.demoPrepared;
-        if (state.demoPrepared) trajectoryForecast.Clear();
-
-        float[] joints = state.jointsDeg ?? Array.Empty<float>();
-        Transform[] armJoints = chaser.armJoints ?? Array.Empty<Transform>();
-        for (int i = 0; i < armJoints.Length; i++)
-        {
-            float angle = i < joints.Length ? joints[i] : 0;
-            Quaternion baseRotation = i < chaser.armBaseRotations.Length
-                ? chaser.armBaseRotations[i] : Quaternion.identity;
-            armJoints[i].localRotation = baseRotation * Quaternion.AngleAxis(angle, Vector3.forward);
-        }
+        dynamics?.Apply();
         foreach (SpatialSensorView view in sensorViews)
         {
             SpatialSensorConfig config = FindSensorConfig(view.sensorId);
@@ -295,6 +305,10 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         RefreshOverview(target, chaser);
     }
 
+    /// <summary>
+    /// 把总览镜头和太阳箭头摆到容易观察的位置，而不是改变航天器的轨道位置。
+    /// 焦点取从目标到追踪器的 48% 插值；镜头偏移随距离调整，53° 视场和箭头、日盘位置用于显示。
+    /// </summary>
     private void RefreshOverview(SpatialCraftAssembly target, SpatialCraftAssembly chaser)
     {
         if (overviewCamera != null)
@@ -332,6 +346,11 @@ public abstract class SpatialSimulationBase : MonoBehaviour
 
     // 太阳方向投影到转轴法平面后，以受光面法线为零位求有符号夹角。
     // 参考装配缺实际限位，因此使用 ±90°。向日方向平行于轴时保留上一帧转角。
+    /// <summary>
+    /// 在演示限位内找一个最朝向太阳的翼面转角。
+    /// 投影的长度平方小于 1e-6 时直接保留上次角度；超过 ±90° 时比较两个端点的点积，而不是直接截断原角度。
+    /// 两端点积分差小于 1e-5 时沿用上次的符号（零归为正）。点积这里用来比较翼面法线朝太阳的程度。
+    /// </summary>
     internal static float BestSolarAngle(Vector3 axis, Vector3 normal, Vector3 towardSun, float previous)
     {
         Vector3 projected = Vector3.ProjectOnPlane(towardSun, axis);
@@ -344,6 +363,11 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         return positive > negative ? 90 : -90;
     }
 
+    /// <summary>
+    /// 把世界向日方向换成太阳翼零位坐标，再用算出的角度转动铰链。
+    /// 先转到铰链父坐标，再用零位旋转的逆变换去掉初始朝向；方向变换不同于位置变换，不加平移。
+    /// 手动模式只给被选角色套用限制在 ±90° 的输入角，其余仍按向日方向计算。
+    /// </summary>
     private void ApplySolarTracking(SpatialCraftAssembly assembly, Vector3 direction, bool target)
     {
         if (assembly.solarAngles == null) assembly.solarAngles = new float[assembly.solarHinges.Length];
@@ -366,6 +390,10 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         return target == (state.manualSolarRole != "chaser");
     }
 
+    /// <summary>
+    /// 把每个有绑定的太阳翼的转角、转轴和受光面方向装进遥测。
+    /// 转轴和法线用世界坐标；入射角是世界法线与向日方向的夹角，单位是度，不是翼的转角。
+    /// </summary>
     private void AppendWingResults(SpatialCraftAssembly assembly, List<SpatialWingResult> results, bool target)
     {
         if (assembly.solarAngles == null) return;
@@ -389,113 +417,11 @@ public abstract class SpatialSimulationBase : MonoBehaviour
             && craftById.TryGetValue(pair.target, out target) && craftById.TryGetValue(pair.chaser, out chaser);
     }
 
-    private float TrajectoryTimeSec()
-    {
-        return (float)(state.trajectoryTimeBase == "onActivation"
-            ? simulationSeconds - trajectoryActivationSec : simulationSeconds);
-    }
-
-    private void ApplyTrajectoryPose(SpatialCraftAssembly target, SpatialCraftAssembly chaser, float time)
-    {
-        if ((state.demoDocking || state.demoPrepared) && target.demoDockPort != null && chaser.demoDockPort != null)
-        {
-            Transform targetPort = target.demoDockPort;
-            Transform chaserPort = chaser.demoDockPort;
-            Vector3 offset = SampleTrajectory(state.trajectory, time);
-            Quaternion variation = SampleTrajectoryRotation(state.trajectory, time);
-            Quaternion facing = Quaternion.LookRotation(-targetPort.forward, targetPort.up);
-            Quaternion body = facing * variation * Quaternion.Inverse(chaserPort.localRotation);
-            Vector3 portPosition = targetPort.position + targetPort.right * offset.x + targetPort.up * offset.y
-                + targetPort.forward * (offset.z + state.demoGapM);
-            chaser.transform.SetPositionAndRotation(portPosition - body * chaserPort.localPosition, body);
-            return;
-        }
-        Vector3 position = SampleTrajectory(state.trajectory, time);
-        Quaternion rotation = ReadAttitude(state.attitude) * SampleTrajectoryRotation(state.trajectory, time);
-        chaser.transform.SetPositionAndRotation(target.transform.position + position, rotation);
-    }
-
-    private void BuildTrajectoryForecast(SpatialCraftAssembly activeTarget, SpatialCraftAssembly activeChaser)
-    {
-        forecastDirty = false;
-        trajectoryForecast.Clear();
-        SpatialTrajectoryPoint[] points = state.trajectory;
-        if (points == null || points.Length < 2) return;
-        float start = points[0].tSec;
-        float window = points[points.Length - 1].tSec - start;
-        float step = state.trajectoryForecastStepSec;
-        if (!IsFinite(step) || step <= 0) step = 10f;
-        int sampleCount = Mathf.CeilToInt(Mathf.Clamp(window / step, 1f, 120f));
-        float sampleSec = window / sampleCount;
-        foreach (SpatialSensorView view in sensorViews)
-        {
-            if (!view.isActiveAndEnabled) continue;
-            ResolveSensorTarget(FindSensorConfig(view.sensorId), activeTarget, out Transform feature,
-                out Renderer[] renderers, out bool resolved, out bool useSurfaceSamples, out Transform ignored);
-            if (!resolved || feature == null) continue;
-            trajectoryForecast.Add(view.sensorId, new TrajectoryOcclusion {
-                view = view, feature = feature, ignoredFeature = ignored,
-                renderers = useSurfaceSamples ? renderers : null,
-                fixedSamplePoints = !useSurfaceSamples && !feature.IsChildOf(activeChaser.transform)
-                    ? TargetSamplePoints(feature) : null,
-                windowSec = window, sampleSec = sampleSec
-            });
-        }
-        if (trajectoryForecast.Count == 0) return;
-
-        // Use the live raycast and installed models, then restore the exact current pose before rendering.
-        Transform chaser = activeChaser.transform;
-        Vector3 savedPosition = chaser.position;
-        Quaternion savedRotation = chaser.rotation;
-        float[] savedAngles = activeChaser.solarAngles == null ? null : (float[])activeChaser.solarAngles.Clone();
-        float[] savedTargetAngles = activeTarget.solarAngles == null ? null : (float[])activeTarget.solarAngles.Clone();
-        try
-        {
-            for (int i = 0; i < sampleCount; i++)
-            {
-                float sampleTime = start + (i + 0.5f) * sampleSec;
-                ApplyTrajectoryPose(activeTarget, activeChaser, sampleTime);
-                if (state.demoDocking)
-                {
-                    Vector3 forecastSun = ComputeSunEci(sampleTime, state.orbit ?? new SpatialOrbit());
-                    forecastSun = new Vector3(forecastSun.x, forecastSun.z, forecastSun.y);
-                    ApplySolarTracking(activeTarget, forecastSun, true);
-                    ApplySolarTracking(activeChaser, forecastSun, false);
-                }
-                Physics.SyncTransforms();
-                foreach (TrajectoryOcclusion forecast in trajectoryForecast.Values)
-                {
-                    Vector3[] samples = forecast.fixedSamplePoints ?? (forecast.renderers != null
-                        ? TargetCraftSurfaceSamplePoints(forecast.renderers, forecast.feature, forecast.view.transform.position)
-                        : TargetSamplePoints(forecast.feature));
-                    forecast.view.MeasureMarkerVisibility(samples, forecast.ignoredFeature, null,
-                        out int inFov, out int visible, out _);
-                    if (inFov == 0) forecast.outOfFovSec += sampleSec;
-                    else if (visible < inFov)
-                    {
-                        forecast.blockedSec += sampleSec;
-                        float windowStart = start + i * sampleSec;
-                        float windowEnd = windowStart + sampleSec;
-                        int last = forecast.occlusionWindows.Count - 1;
-                        if (last >= 0 && Mathf.Abs(forecast.occlusionWindows[last].y - windowStart) < 0.001f)
-                            forecast.occlusionWindows[last] = new Vector2(forecast.occlusionWindows[last].x, windowEnd);
-                        else forecast.occlusionWindows.Add(new Vector2(windowStart, windowEnd));
-                        forecast.peakBlockedRatio = Mathf.Max(forecast.peakBlockedRatio, (float)(inFov - visible) / inFov);
-                    }
-                }
-            }
-        }
-        finally
-        {
-            chaser.SetPositionAndRotation(savedPosition, savedRotation);
-            activeChaser.solarAngles = savedAngles;
-            activeTarget.solarAngles = savedTargetAngles;
-            ApplySolarTracking(activeTarget, sunDirection, true);
-            ApplySolarTracking(activeChaser, sunDirection, false);
-            Physics.SyncTransforms();
-        }
-    }
-
+    /// <summary>
+    /// 把当前一帧的两器状态和每个启用传感器的结果打包送回 Qt。
+    /// 相对位置是追踪器世界位置减目标器世界位置，轨道位置另用千米；stateSeq 对应输入，seq 是 Unity 输出序号。
+    /// 演示同时量对接口位置差和旋转夹角；时间距末点 0.001 秒内算到终点，判为对准还要求误差小于 0.01 米且小于 0.5°。
+    /// </summary>
     private void PublishTelemetry()
     {
         if (!TryGetActiveCraft(out SpatialCraftAssembly activeTarget, out SpatialCraftAssembly activeChaser))
@@ -503,7 +429,7 @@ public abstract class SpatialSimulationBase : MonoBehaviour
             SendError("遥测暂不可用：未配置有效的活动航天器组合");
             return;
         }
-        if (forecastDirty) BuildTrajectoryForecast(activeTarget, activeChaser);
+        SpatialDynamicsTelemetry native = dynamicsError == null ? dynamics?.Telemetry() : null;
         var wings = new List<SpatialWingResult>();
         AppendWingResults(activeTarget, wings, true);
         AppendWingResults(activeChaser, wings, false);
@@ -512,7 +438,8 @@ public abstract class SpatialSimulationBase : MonoBehaviour
             sunArrowOrigin = sunDirectionLine != null ? sunDirectionLine.GetPosition(0) : Vector3.zero,
             sunArrowTip = sunDirectionLine != null ? sunDirectionLine.GetPosition(3) : Vector3.zero,
             wings = wings.ToArray(), showRays = state.showRays, playerWidth = Screen.width, playerHeight = Screen.height,
-            demoDocking = state.demoDocking, demoTimeSec = state.demoDocking ? TrajectoryTimeSec() : 0,
+            demoDocking = state.demoDocking, demoTimeSec = (float)(native?.timeSec ?? 0),
+            demoFinished = dynamics?.Finished ?? false, dynamics = native, dynamicsError = dynamicsError,
             seq = ++telemetrySequence,
             utc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
             simTimeSec = (float)simulationSeconds,
@@ -521,20 +448,17 @@ public abstract class SpatialSimulationBase : MonoBehaviour
             relativePositionUnity = new[] { activeChaser.transform.position.x - activeTarget.transform.position.x,
                                             activeChaser.transform.position.y - activeTarget.transform.position.y,
                                             activeChaser.transform.position.z - activeTarget.transform.position.z },
-            jointsDeg = state.jointsDeg ?? Array.Empty<float>(),
+            jointsDeg = native != null ? dynamics.JointDegrees : Array.Empty<float>(),
             solarArrayDeg = state.solarArrayDeg,
             sunDirectionUnity = new[] { sunDirection.x, sunDirection.y, sunDirection.z },
             orbitPositionKm = new[] { orbitPositionKm.x, orbitPositionKm.y, orbitPositionKm.z },
             earthShadow = earthShadow
         };
-        if (state.demoDocking && state.trajectory != null && activeTarget.demoDockPort != null && activeChaser.demoDockPort != null)
+        if (native != null)
         {
-            Transform targetPort = activeTarget.demoDockPort;
-            Transform chaserPort = activeChaser.demoDockPort;
-            message.demoFinished = message.demoTimeSec >= state.trajectory[state.trajectory.Length - 1].tSec - 0.001f;
-            message.dockingPositionErrorM = Vector3.Distance(chaserPort.position, targetPort.position + targetPort.forward * state.demoGapM);
-            message.dockingAngleErrorDeg = Quaternion.Angle(chaserPort.rotation, Quaternion.LookRotation(-targetPort.forward, targetPort.up));
-            message.dockingAligned = message.demoFinished && message.dockingPositionErrorM < 0.01f && message.dockingAngleErrorDeg < 0.5f;
+            message.dockingAligned = native.mode == 2;
+            message.dockingPositionErrorM = (float)native.portDistanceM;
+            message.dockingAngleErrorDeg = Quaternion.Angle(native.stationPort.rotation, native.visitorPort.rotation);
         }
         List<SpatialSensorTelemetry> results = new List<SpatialSensorTelemetry>();
         foreach (SpatialSensorView view in sensorViews)
@@ -552,25 +476,6 @@ public abstract class SpatialSimulationBase : MonoBehaviour
                                          targetRenderers, sensorConfig?.targetId ?? "ACTIVE_TARGET",
                                          sensorTarget.craftId, targetResolved, targetFeatureToIgnore,
                                          useCraftSurfaceSamples ? "surface" : "marker");
-            if (trajectoryForecast.TryGetValue(view.sensorId, out TrajectoryOcclusion forecast))
-            {
-                view.latest.trajectoryForecastAvailable = true;
-                view.latest.trajectoryForecastWindowSec = forecast.windowSec;
-                view.latest.trajectoryForecastSampleSec = forecast.sampleSec;
-                view.latest.trajectoryForecastBlockedSec = forecast.blockedSec;
-                view.latest.trajectoryForecastOutOfFovSec = forecast.outOfFovSec;
-                view.latest.trajectoryForecastPeakBlockedRatio = forecast.peakBlockedRatio;
-                float now = TrajectoryTimeSec();
-                foreach (Vector2 window in forecast.occlusionWindows)
-                {
-                    if (window.y <= now + forecast.sampleSec) continue;
-                    view.latest.futureOcclusion = true;
-                    view.latest.futureOcclusionStartSec = Mathf.Max(window.x, now + forecast.sampleSec);
-                    view.latest.futureOcclusionEndSec = window.y;
-                    break;
-                }
-            }
-            view.DrawFrustum();
             results.Add(view.latest);
         }
         message.sensors = results.ToArray();
@@ -585,6 +490,11 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         return null;
     }
 
+    /// <summary>
+    /// 把报文里的目标 ID 变成可用于采样的飞行器或部件。
+    /// ACTIVE_TARGET 和 DOCK-TARGET 沿用活动目标；其他 ID 首先匹配活动飞行器，再查部件名或 partId。
+    /// 查不到会回退到活动目标，同时把 targetResolved 置为 false；首选对接标靶，无标靶时用机体包围盒采样。
+    /// </summary>
     private SpatialCraftAssembly ResolveSensorTarget(SpatialSensorConfig config, SpatialCraftAssembly activeTarget,
                                                       out Transform targetFeature, out Renderer[] targetRenderers,
                                                       out bool targetResolved, out bool useCraftSurfaceSamples,
@@ -627,6 +537,11 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         return selectedCraft;
     }
 
+    /// <summary>
+    /// 用模型外面的一个大盒子代替真实曲面，挑朝传感器的那一面放 3×3 个采样点。
+    /// 合并启用且激活的 Renderer 世界轴对齐包围盒；传感器方向绝对值最大的分量选面轴，符号选正面或反面。
+    /// 盒面内两轴用边长的 −35%、0、35% 从中心取点；没有可用盒子就改取标靶点。
+    /// </summary>
     private static Vector3[] TargetCraftSurfaceSamplePoints(Renderer[] renderers, Transform fallback,
                                                             Vector3 sensorPosition)
     {
@@ -681,6 +596,10 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         else vector.z = value;
     }
 
+    /// <summary>
+    /// 在标靶平面上放九个测试点，供视场和遮挡逐点检查。
+    /// 中心是标靶世界位置，右、上方向分别取 −0.28、0、0.28 米的偏移；这不是根据模型网格自动量出的尺寸。
+    /// </summary>
     private static Vector3[] TargetSamplePoints(Transform target)
     {
         Vector3 center = target.position;
@@ -692,77 +611,12 @@ public abstract class SpatialSimulationBase : MonoBehaviour
 
     private static bool IsFinite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
 
-    private static bool IsValidTrajectory(SpatialTrajectoryPoint[] points)
-    {
-        if (points == null) return true;
-        if (points.Length > 2048) return false;
-        float previous = -1f;
-        foreach (SpatialTrajectoryPoint point in points)
-        {
-            if (point == null || !IsFinite(point.tSec) || point.tSec < 0 || point.tSec <= previous
-                || !IsFiniteVector(point.relativePositionM)
-                || (point.relativeEulerDeg != null && point.relativeEulerDeg.Length != 0 && !IsFiniteVector(point.relativeEulerDeg)))
-                return false;
-            previous = point.tSec;
-        }
-        return true;
-    }
-
-    private static bool IsFiniteVector(float[] values) => values != null && values.Length == 3
-        && IsFinite(values[0]) && IsFinite(values[1]) && IsFinite(values[2]);
-
-    private static bool SameTrajectory(SpatialTrajectoryPoint[] first, SpatialTrajectoryPoint[] second)
-    {
-        if (first == second) return true;
-        if (first == null || second == null || first.Length != second.Length) return false;
-        for (int i = 0; i < first.Length; i++)
-            if (first[i].tSec != second[i].tSec || !ReadVector(first[i].relativePositionM).Equals(ReadVector(second[i].relativePositionM))
-                || !ReadVector(first[i].relativeEulerDeg).Equals(ReadVector(second[i].relativeEulerDeg))) return false;
-        return true;
-    }
-
-    private static int TrajectoryUpperSample(SpatialTrajectoryPoint[] points, float time, out float fraction)
-    {
-        fraction = 0f;
-        if (points.Length == 1 || time <= points[0].tSec) return 0;
-        for (int i = 1; i < points.Length; i++)
-        {
-            if (time > points[i].tSec) continue;
-            fraction = Mathf.InverseLerp(points[i - 1].tSec, points[i].tSec, time);
-            return i;
-        }
-        fraction = 1f;
-        return points.Length - 1;
-    }
-
-    private Vector3 SampleTrajectory(SpatialTrajectoryPoint[] points, float time)
-    {
-        int upper = TrajectoryUpperSample(points, time, out float t);
-        return Vector3.Lerp(ReadVector(points[Mathf.Max(0, upper - 1)].relativePositionM),
-            ReadVector(points[upper].relativePositionM), state.demoDocking ? Mathf.SmoothStep(0, 1, t) : t);
-    }
-
-    private static Quaternion SampleTrajectoryRotation(SpatialTrajectoryPoint[] points, float time)
-    {
-        int upper = TrajectoryUpperSample(points, time, out float t);
-        return Quaternion.Slerp(Quaternion.Euler(ReadVector(points[Mathf.Max(0, upper - 1)].relativeEulerDeg)),
-            Quaternion.Euler(ReadVector(points[upper].relativeEulerDeg)), t);
-    }
-
-    private static Quaternion ReadAttitude(SpatialAttitude attitude)
-    {
-        if (attitude == null) return Quaternion.identity;
-        if (attitude.mode == "quaternion" && attitude.quaternionWxyz != null && attitude.quaternionWxyz.Length >= 4)
-            return new Quaternion(attitude.quaternionWxyz[1], attitude.quaternionWxyz[2],
-                                 attitude.quaternionWxyz[3], attitude.quaternionWxyz[0]).normalized;
-        return Quaternion.Euler(ReadVector(attitude.eulerDeg));
-    }
-
-    private static Vector3 ReadVector(float[] values)
-    {
-        return values != null && values.Length >= 3 ? new Vector3(values[0], values[1], values[2]) : Vector3.zero;
-    }
-
+    /// <summary>
+    /// 用历元加仿真秒估计当时从地球指向太阳的单位方向，输出 ECI 分量。
+    /// ECI 是以地心为原点、不随地表每天转一圈的惯性坐标；这里先把 UTC 换成儒略日（连续按日计时），再把闰秒和 32.184 秒加入作为 TT（地球时）。
+    /// 2451545.0 是 J2000 参考儒略日，36525 是每儒略世纪天数；用世纪数求太阳经度和黄赤交角（黄道与赤道夹角），再投到赤道坐标。
+    /// 未找到这里近似式各系数的来源说明；日期解析失败则用 2026-11-21 00:00:00 UTC。
+    /// </summary>
     private static Vector3 ComputeSunEci(float elapsedSeconds, SpatialOrbit orbit)
     {
         DateTime epoch;
@@ -790,6 +644,13 @@ public abstract class SpatialSimulationBase : MonoBehaviour
                                     (float)(Math.Sin(obliquity) * Math.Sin(eclipticLongitude))).normalized;
     }
 
+    /// <summary>
+    /// 更新场景里的向日方向，并用地心轨道位置判断飞行器是否进入地影。
+    /// 向日方向从 ECI 转到 Unity 时交换 Y/Z；灯光朝反方向表示光从太阳射向场景；地影比较仍在 ECI 中做。
+    /// 半长轴取地球半径加至少 100 km 的输入高度，偏心率限制在 0 到 0.8；平均角速度 n=√(μ/a³)，平近点角 M=M₀+n·t。
+    /// 用 12 次牛顿迭代近似解 E−e·sin(E)=M，再用 x=a(cos(E)−e)、y=a√(1−e²)sin(E) 得轨道平面位置，经近地点幅角、倾角、升交点赤经转进 ECI。
+    /// 旋转结果显式转为 Vector3 的 float 分量；沿太阳方向点积为负且离太阳轴小于地球半径才判为地影，相当于圆柱阴影近似。
+    /// </summary>
     private void UpdateSolarGeometry(float elapsedSeconds)
     {
         SpatialOrbit orbit = state.orbit ?? new SpatialOrbit();
@@ -830,4 +691,5 @@ public abstract class SpatialSimulationBase : MonoBehaviour
 
     private static double Radians(double degrees) { return degrees * Math.PI / 180.0; }
 }
+
 

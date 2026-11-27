@@ -7,6 +7,9 @@
 
 #include "runtimedata.h"
 
+// 这是 Qt 桌面程序的进程入口：先选数据目录，再创建主窗口并进入事件循环。
+// QApplication 管理窗口和鼠标等事件；app.exec() 持续分发事件，关闭后 main 才返回。
+// 路径和数据检查通过 RuntimeData 集中处理，窗口打开前确定本次运行的数据根目录。
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);

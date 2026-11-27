@@ -14,6 +14,9 @@
 #include <windows.h>
 #endif
 
+// 构造 Qt 主窗口，读取数据和配置，连接 TCP、Unity 子进程、定时器与界面控件。
+// 这是 C++ 构造函数；冒号后的初始化列表先初始化 QMainWindow 父类。
+// connect 把信号（事件）接到槽（响应函数或 lambda）；定时器到期时由 Qt 事件循环调用对应工作。
 MainWindow::MainWindow(const QString &dataRoot, QWidget *parent) : QMainWindow(parent)
 {
     QCoreApplication::setOrganizationName("SpatialPositionRelation");

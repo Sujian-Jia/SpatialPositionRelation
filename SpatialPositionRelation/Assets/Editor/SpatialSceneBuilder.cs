@@ -14,6 +14,10 @@ public static class SpatialSceneBuilder
     private const string MaterialRoot = "Assets/Spatial/Materials";
     private static readonly Dictionary<string, Material> Materials = new Dictionary<string, Material>();
 
+    /// <summary>
+    /// 在编辑器中搭建完整演示场景，把两套预制体实例、灯、相机和通信组件连起来。
+    /// MenuItem 把静态方法放到 Unity 菜单里；运行时代码读的是已经保存的场景引用。
+    /// </summary>
     [MenuItem("Spatial Demo/Build Demo Scene")]
     public static void BuildDemoScene()
     {
@@ -29,8 +33,8 @@ public static class SpatialSceneBuilder
         RenderSettings.defaultReflectionMode = UnityEngine.Rendering.DefaultReflectionMode.Custom;
         RenderSettings.customReflection = null;
 
-        SpatialCraftAssembly station = CreateCraft("SpaceStation", "空间站", "Assets/Prefabs/服务航天器.prefab");
-        SpatialCraftAssembly crew = CreateCraft("CrewVehicle", "载人飞船", "Assets/Prefabs/服务航天器.prefab");
+        SpatialCraftAssembly station = CreateCraft("SpaceStation", "己方航天器", "Assets/Prefabs/服务航天器.prefab");
+        SpatialCraftAssembly crew = CreateCraft("CrewVehicle", "目标航天器", "Assets/Prefabs/服务航天器.prefab");
         CreateCraft("CargoVehicle", "货运飞船", "Assets/Prefabs/bianqueCraft.prefab");
         CreateCraft("OpticalModule", "光学仓", "Assets/Prefabs/bianqueCraft.prefab");
         if (station.armJoints.Length != 7 || crew.armJoints.Length != 7)
@@ -39,7 +43,7 @@ public static class SpatialSceneBuilder
             || station.dockingPort.name != "机械臂到达点的坐标")
             throw new InvalidOperationException("服务航天器 reference prefab is missing its imported solar wings or docking anchor.");
 
-        SpatialSensorView[] sensors = CreateSensors(crew, Materials["frustum"]);
+        SpatialSensorView[] sensors = CreateSensors(station, Materials["frustum"]);
         Camera overview = CreateOverviewCamera();
         Light sun = CreateSun();
         AddEarth();
@@ -76,6 +80,10 @@ public static class SpatialSceneBuilder
                   + " sensors=" + sensors.Length + " referencePrefabs=2 syntheticCraftMeshes=0 armJoints=7 solarHinges=2");
     }
 
+    /// <summary>
+    /// 先生成演示场景，再用它打包独立运行的 Windows Player，让 Qt 可以启动这个可执行程序。
+    /// BuildPlayerOptions 指定场景和输出路径；这是编辑器构建入口，不会在 Player 每帧执行。
+    /// </summary>
     public static void BuildWindowsPlayer()
     {
         BuildDemoScene();
@@ -186,6 +194,11 @@ public static class SpatialSceneBuilder
         return material;
     }
 
+    /// <summary>
+    /// 把一个飞行器预制体实例转成运行时可操控、可查询的飞行器。
+    /// 太阳翼在各铰链的局部坐标中用包围盒最长轴作转轴、最短轴作初始法线，再将法线符号按机体前向统一。
+    /// 若找到舱体，演示口取包围盒的一个 X 端面，Y/Z 取中心；追踪器取 +X 端，其余取 −X 端。
+    /// </summary>
     private static SpatialCraftAssembly CreateCraft(string id, string displayName, string prefabPath)
     {
         if (string.IsNullOrEmpty(prefabPath))
@@ -198,6 +211,9 @@ public static class SpatialSceneBuilder
         GameObject model = AddReferenceVisual(root.transform, prefabPath, id);
         if (model == null) throw new InvalidOperationException("Could not instantiate reference prefab: " + prefabPath);
 
+        assembly.referenceVisual = model.transform;
+        assembly.dynamicsPort = new GameObject("7DOF 对接口参考系").transform;
+        assembly.dynamicsPort.SetParent(root.transform, false);
         assembly.dockingPort = FindDockingAnchor(model.transform);
         assembly.armJoints = FindLongestJointChain(model.transform);
         assembly.armBaseRotations = CaptureLocalRotations(assembly.armJoints);
@@ -225,7 +241,7 @@ public static class SpatialSceneBuilder
         if (hull != null)
         {
             Bounds hullBounds = CalculateBoundsInParentSpace(hull.GetComponentsInChildren<Renderer>(true), root.transform);
-            bool approachSide = id == "CrewVehicle";
+            bool approachSide = id == "SpaceStation";
             var port = new GameObject("演示对接基准_舱体端面").transform;
             port.SetParent(root.transform, false);
             port.localPosition = new Vector3(approachSide ? hullBounds.max.x : hullBounds.min.x, hullBounds.center.y, hullBounds.center.z);
@@ -268,6 +284,11 @@ public static class SpatialSceneBuilder
         return installations.ToArray();
     }
 
+    /// <summary>
+    /// 在没有标定镜头节点的模型上，用从外朝内的射线寻找镜头安装基准。
+    /// 沿父物体的 +X 观察，筛掉未启用的碰撞体、触发器和指定下游关节子树；依次缩小横向偏移直到命中。
+    /// 找到后在命中点沿光轴向外留 2 毫米；没找到就不创建安装点，运行态可据此停用对应机位。
+    /// </summary>
     private static void AddCameraInstallation(List<Transform> installations, Transform parent,
         Transform geometry, Transform downstreamJoint, string id, float yOffsetM, float zOffsetM)
     {
@@ -309,6 +330,11 @@ public static class SpatialSceneBuilder
             + $"surfaceWorldM={nearest.point:F5} entranceWorldM={anchor.position:F5} axisWorld={forward:F5}");
     }
 
+    /// <summary>
+    /// 实例化飞行器模板，把模型居中缩放，并为几何射线补上物理碰撞体和部件标识。
+    /// 预制体是一份对象层级模板，InstantiatePrefab 把它放进场景成为实例；从模板加载失败会抛出异常。
+    /// 模型先绕 Y 转 90°；最长包围盒边超过 0.001 才按 5.5/最长边同比缩放，再按缩放后的盒中心平移居中。
+    /// </summary>
     private static GameObject AddReferenceVisual(Transform parent, string path, string craftId)
     {
         GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
@@ -386,6 +412,10 @@ public static class SpatialSceneBuilder
         return model;
     }
 
+    /// <summary>
+    /// 量模型在指定父物体坐标中的包围范围，给居中、缩放、对接基准和翼轴选择使用。
+    /// 把各 Renderer 包围盒角点换到指定坐标后合并极值；包围盒用矩形盒近似包含模型。
+    /// </summary>
     private static Bounds CalculateBoundsInParentSpace(Renderer[] renderers, Transform parent)
     {
         Bounds bounds = new Bounds();

@@ -1,21 +1,8 @@
 {
-  "relativeDistanceM": 20.0,
-  "demoGapM": 0.12,
-  "trajectoryForecastStepSec": 10.0,
-  "demoTrajectoryPoints": [
-    { "tSec": 0, "relativePositionM": [0, 7, 20], "relativeEulerDeg": [0, -8, 0] },
-    { "tSec": 240, "relativePositionM": [0, 0, 20], "relativeEulerDeg": [0, 0, 0] },
-    { "tSec": 680, "relativePositionM": [0, 0, 6], "relativeEulerDeg": [0, 0, 0] },
-    { "tSec": 1080, "relativePositionM": [0, 0, 0], "relativeEulerDeg": [0, 0, 0] }
-  ],
+  "dynamicsSpeed": 1.0,
   "viewSensorId": "",
   "overviewMode": "fixed",
   "displaySensorIds": ["CRDS-PORT", "TV-DOCK-WIDE"],
-  "activePair": {
-    "target": "SpaceStation",
-    "chaser": "CrewVehicle"
-  },
-  "jointsDeg": [0, 0, 0, 0, 0, 0, 0],
   "orbit": {
     "altitudeKm": 600.0,
     "eccentricity": 0.001,
@@ -26,11 +13,6 @@
     "timeScale": 60.0,
     "leapSeconds": 37,
     "epochUtc": "2026-11-21T00:00:00Z"
-  },
-  "attitude": {
-    "mode": "euler",
-    "eulerDeg": [0.0, 0.0, 0.0],
-    "quaternionWxyz": [1.0, 0.0, 0.0, 0.0]
   },
   "sensors": [
     {

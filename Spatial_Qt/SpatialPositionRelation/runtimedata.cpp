@@ -85,6 +85,8 @@ QString RuntimeData::requestedRoot(const QString &argument)
     return defaultRoot();
 }
 
+// 检查用户指定的数据目录是否符合本机存储策略，并验证能否写入。
+// error 是引用输出参数，函数可同时返回处理后的路径和说明文本；调用处依据空路径决定是否进入只读模式。
 QString RuntimeData::validateRoot(const QString &input, QString &error)
 {
     const QString path = QDir::cleanPath(QDir::fromNativeSeparators(QFileInfo(input).absoluteFilePath()));
@@ -118,6 +120,8 @@ bool RuntimeData::storeRoot(const QString &root, QString &error)
     return true;
 }
 
+// 在获准的数据根目录下拼一个文件路径，拒绝绝对路径和跳出根目录的相对路径。
+// canonical path 是解析符号链接等别名后的路径；实际使用前还检查目录所在盘并创建父目录。
 QString RuntimeData::path(const QString &root, const QString &relative)
 {
     if (root.isEmpty() || QDir::isAbsolutePath(relative)) return {};
@@ -128,6 +132,8 @@ QString RuntimeData::path(const QString &root, const QString &relative)
     return filepath;
 }
 
+// 把一个 JSON 对象保存成带缩进的数据文件。
+// QSaveFile 在临时文件写完后提交，函数返回 bool 告诉调用方是否保存成功。
 bool RuntimeData::saveJson(const QString &path, const QJsonObject &value)
 {
     if (path.isEmpty()) return false;
@@ -144,6 +150,8 @@ bool RuntimeData::rotateLog(const QString &path)
     return QFile::rename(path, previous);
 }
 
+// 把一段日志追加到文件，超过容量上限时先轮换旧日志。
+// limit 和 data.size() 的单位都是字节；单条数据本身大于上限时直接跳过。
 void RuntimeData::appendLog(const QString &path, const QByteArray &data, qint64 limit)
 {
     if (path.isEmpty() || data.isEmpty() || data.size() > limit) return;
@@ -152,6 +160,8 @@ void RuntimeData::appendLog(const QString &path, const QByteArray &data, qint64 
     if (file.open(QIODevice::WriteOnly | QIODevice::Append)) file.write(data);
 }
 
+// 在会话锁允许时清理超出总容量或单文件容量的旧日志。
+// 会话文件锁避免删掉正在写入的文件；这里的 512 MiB 和 128 MiB 是保留上限，不是空间计算参数。
 void RuntimeData::pruneLogs(const QString &root)
 {
     if (root.isEmpty()) return;

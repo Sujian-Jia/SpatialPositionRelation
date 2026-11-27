@@ -25,6 +25,8 @@ QJsonArray vectorArray(const QVector<QDoubleSpinBox *> &spins)
 }
 }
 
+// 先读发布时的默认 JSON，再覆盖用户保存的设置，并按 ID 合并传感器配置。
+// JSON 是带字段名的数据文本格式；QJsonObject 按键存取，部分旧字段还有定向迁移逻辑。
 void MainWindow::loadConfig()
 {
     const QString path = QDir(QCoreApplication::applicationDirPath()).filePath("config/default_config.json");
@@ -50,8 +52,10 @@ void MainWindow::loadConfig()
             m_config = defaultConfig;
             for (auto it = savedConfig.constBegin(); it != savedConfig.constEnd(); ++it) {
                 if (it.key() == "sensors" || it.key() == "demoTrajectoryPoints" || it.key() == "demoGapM"
-                    || it.key() == "demoTrajectoryEnabled" || it.key() == "solarArrayDeg") continue;
-                if (it.key() == "orbit" || it.key() == "attitude" || it.key() == "activePair") {
+                    || it.key() == "demoTrajectoryEnabled" || it.key() == "solarArrayDeg"
+                    || it.key() == "jointsDeg" || it.key() == "relativeDistanceM" || it.key() == "attitude"
+                    || it.key() == "activePair") continue;
+                if (it.key() == "orbit") {
                     QJsonObject merged = m_config.value(it.key()).toObject();
                     const QJsonObject savedObject = it.value().toObject();
                     for (auto savedField = savedObject.constBegin(); savedField != savedObject.constEnd(); ++savedField)
@@ -125,15 +129,8 @@ void MainWindow::loadConfig()
         }
     }
     m_sensorConfigs = m_config.value("sensors").toArray();
-    m_distanceSlider->setValue(qRound(defaultConfig.value("relativeDistanceM").toDouble(20) * 10));
-    m_distanceLabel->setText(QString::number(m_distanceSlider->value() / 10.0, 'f', 1) + " m");
     m_solarSlider->setValue(0);
-    const QJsonArray joints = defaultConfig.value("jointsDeg").toArray();
-    for (int i = 0; i < m_jointSliders.size(); ++i) {
-        const int angle = i < joints.size() ? qRound(joints[i].toDouble()) : 0;
-        m_jointSliders[i]->setValue(angle);
-        m_jointValueLabels[i]->setText(QString::number(angle) + "°");
-    }
+    m_dynamicsSpeed->setValue(m_config.value("dynamicsSpeed").toDouble(1));
     const QJsonObject orbit = m_config.value("orbit").toObject();
     const QStringList keys = {"altitudeKm", "eccentricity", "inclinationDeg", "raanDeg",
                               "argPeriapsisDeg", "meanAnomalyDeg", "timeScale"};
@@ -143,24 +140,6 @@ void MainWindow::loadConfig()
     QDateTime epoch = QDateTime::fromString(orbit.value("epochUtc").toString(), Qt::ISODateWithMs);
     if (!epoch.isValid()) epoch = QDateTime::fromString(orbit.value("epochUtc").toString(), Qt::ISODate);
     if (epoch.isValid()) m_epochUtcEdit->setDateTime(epoch.toUTC());
-    const QJsonObject attitude = m_config.value("attitude").toObject();
-    const QString mode = attitude.value("mode").toString("euler");
-    const int modeIndex = m_attitudeMode->findData(mode);
-    m_attitudeMode->setCurrentIndex(modeIndex >= 0 ? modeIndex : 0);
-    const QJsonArray euler = attitude.value("eulerDeg").toArray();
-    for (int i = 0; i < m_attitudeSpins.size(); ++i)
-        m_attitudeSpins[i]->setValue(i < euler.size() ? euler[i].toDouble() : 0);
-    const QJsonArray quaternion = attitude.value("quaternionWxyz").toArray();
-    const QVector<double> defaultQuaternion = {1, 0, 0, 0};
-    for (int i = 0; i < m_quaternionSpins.size(); ++i)
-        m_quaternionSpins[i]->setValue(i < quaternion.size() ? quaternion[i].toDouble() : defaultQuaternion[i]);
-    m_eulerAttitudeEditor->setVisible(mode == "euler");
-    m_quaternionAttitudeEditor->setVisible(mode == "quaternion");
-    const QJsonObject activePair = m_config.value("activePair").toObject();
-    const int targetIndex = m_targetCraft->findData(activePair.value("target").toString());
-    const int chaserIndex = m_chaserCraft->findData(activePair.value("chaser").toString());
-    if (targetIndex >= 0) m_targetCraft->setCurrentIndex(targetIndex);
-    if (chaserIndex >= 0) m_chaserCraft->setCurrentIndex(chaserIndex);
     for (const auto &entry : m_sensorConfigs) {
         const QJsonObject sensor = entry.toObject();
         const QString id = sensor.value("id").toString();
@@ -169,6 +148,8 @@ void MainWindow::loadConfig()
     if (m_sensorCombo->count()) editSelectedSensor();
 }
 
+// 把当前选中传感器的配置字段填入右侧编辑控件。
+// 控件编辑期间由标志位避免逐个 setValue 又触发一轮配置回写。
 void MainWindow::editSelectedSensor()
 {
     const QScopedValueRollback<bool> loading(m_loadingSensorEditor, true);
@@ -191,6 +172,8 @@ void MainWindow::editSelectedSensor()
     }
 }
 
+// 把编辑控件中的视场、安装偏移、姿态和告警开关写回选中传感器的 JSON 对象。
+// 局部位置三个数按 X/Y/Z 顺序存入配置；发送端字段名 localPositionM 表示传给 Unity 的单位是米。
 void MainWindow::applySensorEditor()
 {
     const QString id = m_sensorCombo->currentData().toString();
@@ -207,19 +190,12 @@ void MainWindow::applySensorEditor()
     }
 }
 
+// 从界面控件和当前配置拼一份发给 Unity 的状态快照。
 QJsonObject MainWindow::currentState() const
 {
     QJsonObject state;
-    state["relativeDistanceM"] = m_distanceSlider->value() / 10.0;
-    state.remove("demoTrajectoryEnabled");
-    state["demoTrajectoryPoints"] = m_config.value("demoTrajectoryPoints").toArray();
-    state["trajectoryForecastStepSec"] = m_config.value("trajectoryForecastStepSec").toDouble(10.0);
-    state["activePair"] = QJsonObject{{"target", m_targetCraft->currentData().toString()},
-                                      {"chaser", m_chaserCraft->currentData().toString()}};
-    QJsonArray joints;
-    for (const auto *slider : m_jointSliders) joints.append(slider->value());
-    state["jointsDeg"] = joints;
-    state.remove("solarArrayDeg");
+    state["dynamicsSpeed"] = m_dynamicsSpeed->value();
+    state["activePair"] = QJsonObject{{"target", "CrewVehicle"}, {"chaser", "SpaceStation"}};
 
     const QStringList keys = {"altitudeKm", "eccentricity", "inclinationDeg", "raanDeg",
                               "argPeriapsisDeg", "meanAnomalyDeg", "timeScale"};
@@ -228,11 +204,6 @@ QJsonObject MainWindow::currentState() const
     orbit["leapSeconds"] = m_config.value("orbit").toObject().value("leapSeconds").toDouble(37);
     orbit["epochUtc"] = m_epochUtcEdit->dateTime().toUTC().toString(Qt::ISODate);
     state["orbit"] = orbit;
-    QJsonObject attitude = m_config.value("attitude").toObject();
-    attitude["mode"] = m_attitudeMode->currentData().toString();
-    attitude["eulerDeg"] = vectorArray(m_attitudeSpins);
-    attitude["quaternionWxyz"] = vectorArray(m_quaternionSpins);
-    state["attitude"] = attitude;
     state["sensors"] = m_sensorConfigs;
     state["viewSensorId"] = QString();
     state["overviewMode"] = m_config.value("overviewMode").toString("fixed");
@@ -240,6 +211,9 @@ QJsonObject MainWindow::currentState() const
     return state;
 }
 
+// 把当前界面状态补齐成 SPR/1 state 消息，压成单行 JSON 后经本机 TCP 发给 Unity。
+// 序号自增后显式转成 qint64，避免把较大的无符号 Qt 计数直接传入仅支持有符号整数的 JSON 构造器。
+// 结尾换行是双方的消息边界；这不是 TCP 自身提供的边界。
 void MainWindow::sendState()
 {
     if (!m_handshake || m_socket->state() != QAbstractSocket::ConnectedState) return;
@@ -251,13 +225,6 @@ void MainWindow::sendState()
     message["solarArrayDeg"] = m_solarSlider->value();
     message["demoRunId"] = m_demoRunId;
     message["demoDocking"] = m_demoActive;
-    message["demoPrepared"] = m_demoPrepared;
-    if (m_demoActive || m_demoPrepared) {
-        message["trajectory"] = message.value("demoTrajectoryPoints");
-        message["trajectoryTimeBase"] = "onActivation";
-    }
-    message.remove("demoTrajectoryPoints");
-
     message["protocol"] = "SPR/1";
     message["type"] = "state";
     message["seq"] = static_cast<qint64>(++m_sequence);
@@ -267,6 +234,9 @@ void MainWindow::sendState()
     RuntimeData::appendLog(m_tcpOutLog, line);
 }
 
+// 解开 Unity 发来的一行 JSON，根据 type 分派 ready、firstFrame、telemetry、sensorFrame 和视图设置事件。
+// ready 时比对实例令牌，令牌相同才标记握手完成并开始发送状态；不匹配则中断连接。
+// 传感器帧另交保存流程，遥测另交界面表格；JSON 解析失败或协议不符就丢弃。
 void MainWindow::receiveMessage(const QByteArray &line)
 {
     QJsonParseError error;
@@ -332,6 +302,8 @@ void MainWindow::receiveMessage(const QByteArray &line)
         statusBar()->showMessage(message.value("message").toString(), 8000);
 }
 
+// 把当前界面设置保存到用户数据目录，而非覆盖程序自带的默认配置。
+// QSaveFile 采用临时写入后提交的保存方式；无法取得可写数据目录时提前返回。
 void MainWindow::saveConfig()
 {
     if (!requireWritableData()) return;
