@@ -59,6 +59,8 @@ public abstract class SpatialSimulationBase : MonoBehaviour
     protected virtual void OnDestroy()
     {
         Camera.onPostRender -= RecordFirstFrame;
+        ClearForecast();
+        ClearArmPreview();
         dynamics?.Dispose();
     }
     private float telemetryTimer;
@@ -68,6 +70,57 @@ public abstract class SpatialSimulationBase : MonoBehaviour
     private bool earthShadow;
     private SpatialDynamicsAdapter dynamics;
     private string dynamicsError;
+    private SpatialOcclusionForecast forecast;
+    private bool forecastFailed;
+    private const string GrappleTargetId = "GRAPPLE-FIXTURE";
+    private bool demoStarted;
+    private SpatialArmPreview armPreview;
+
+    private void ClearForecast()
+    {
+        forecast?.Dispose();
+        forecast = null;
+        forecastFailed = false;
+    }
+
+    private void UpdateForecast(SpatialCraftAssembly station, SpatialCraftAssembly visitor)
+    {
+        if (!state.demoDocking || dynamics == null || dynamicsError != null || dynamics.Finished || forecastFailed) return;
+        try
+        {
+            if (forecast == null)
+                forecast = new SpatialOcclusionForecast(dynamics, station, visitor, sunDirection, ApplySolarTracking);
+            forecast.Work(12, EvaluateForecastOcclusion);
+        }
+        catch (Exception exception)
+        {
+            ClearForecast();
+            forecastFailed = true;
+            SendError("未来遮挡预测中断：" + exception.Message);
+        }
+    }
+
+    private static Vector2Int EvaluateForecastOcclusion(SpatialSensorView view,
+        SpatialCraftAssembly station, SpatialCraftAssembly visitor)
+    {
+        ResolveSensorTarget(view.configuration, visitor, station,
+            out Transform feature, out Renderer[] renderers, out _, out bool surface, out Transform ignore);
+        Vector3[] points = surface ? TargetCraftSurfaceSamplePoints(renderers, feature, view.transform.position)
+            : TargetSamplePoints(feature, TargetHalfSpan(view.configuration, feature, visitor));
+        return view.CountOcclusion(points, ignore);
+    }
+
+    private static bool SameOcclusionConfiguration(SpatialStateMessage a, SpatialStateMessage b)
+    {
+        if (a.demoRunId != b.demoRunId || a.manualSolarDiagnostic != b.manualSolarDiagnostic ||
+            a.manualSolarRole != b.manualSolarRole || a.solarArrayDeg != b.solarArrayDeg) return false;
+        var left = a.sensors ?? Array.Empty<SpatialSensorConfig>();
+        var right = b.sensors ?? Array.Empty<SpatialSensorConfig>();
+        if (left.Length != right.Length) return false;
+        for (int i = 0; i < left.Length; i++)
+            if (JsonUtility.ToJson(left[i]) != JsonUtility.ToJson(right[i])) return false;
+        return JsonUtility.ToJson(a.orbit) == JsonUtility.ToJson(b.orbit);
+    }
 
     /// <summary>
     /// 运行开始时找到通信组件，按 ID 登记两器和传感器，并用默认状态布置场景。
@@ -91,6 +144,7 @@ public abstract class SpatialSimulationBase : MonoBehaviour
             Debug.LogError(dynamicsError);
         }
         UpdateSolarGeometry(0);
+        SetSunVisuals(false);
         ApplyState();
         Debug.Log("SPATIAL_SCENE_READY utc=" + DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture));
     }
@@ -121,6 +175,8 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         SpatialOrbit orbit = state.orbit ?? new SpatialOrbit();
         double timeScale = Math.Max(0, orbit.timeScale);
         simulationSeconds += Time.deltaTime * timeScale;
+        if (TryGetActiveCraft(out var forecastTarget, out var forecastChaser))
+            UpdateForecast(forecastChaser, forecastTarget);
         if (dynamics != null && dynamicsError == null && state.demoDocking)
         {
             try {
@@ -175,24 +231,69 @@ public abstract class SpatialSimulationBase : MonoBehaviour
                 CaptureSensor(JsonUtility.FromJson<SpatialCaptureMessage>(line));
                 return;
             }
+            if (incoming?.protocol == "SPR/1" && incoming.type == "presentation")
+            {
+                ApplyPresentation(JsonUtility.FromJson<SpatialPresentationMessage>(line));
+                return;
+            }
             if (incoming == null || incoming.protocol != "SPR/1" || incoming.type != "state")
             {
                 SendError("协议版本或消息类型无效");
                 return;
             }
             if (!(incoming.dynamicsSpeed >= 0.25 && incoming.dynamicsSpeed <= 16)) incoming.dynamicsSpeed = 1;
-            if (state.demoRunId != incoming.demoRunId && dynamics != null)
+            if (state.demoRunId != incoming.demoRunId)
             {
-                dynamics.Reset();
-                dynamicsError = null;
+                ClearArmPreview();
+                demoStarted = false;
+                if (dynamics != null)
+                {
+                    dynamics.Reset();
+                    dynamicsError = null;
+                }
             }
+            if (incoming.demoDocking)
+            {
+                ClearArmPreview();
+                demoStarted = true;
+            }
+            if (!SameOcclusionConfiguration(state, incoming)) ClearForecast();
             state = incoming;
+            forecast?.SetPaused(!state.demoDocking);
             ApplyState();
         }
         catch (Exception exception)
         {
             SendError("状态 JSON 无法解析：" + exception.Message);
         }
+    }
+
+    private void ClearArmPreview()
+    {
+        armPreview?.Dispose();
+        armPreview = null;
+    }
+
+    private void SetSunVisuals(bool visible)
+    {
+        if (sunDisc != null) sunDisc.gameObject.SetActive(visible);
+        if (sunDirectionLine != null) sunDirectionLine.enabled = visible;
+        if (embeddedViews != null) embeddedViews.ShowSunVector = visible;
+    }
+
+    private void ApplyPresentation(SpatialPresentationMessage presentation)
+    {
+        if (presentation == null || presentation.demoRunId != state.demoRunId) return;
+        SetSunVisuals(presentation.showSunVector);
+        if (dynamics == null || dynamicsError != null || state.demoDocking || demoStarted && !dynamics.Finished ||
+            !SpatialArmPreview.ValidAngles(presentation.previewJointDegrees) ||
+            !TryGetActiveCraft(out _, out var station) || overviewCamera == null)
+        {
+            ClearArmPreview();
+            return;
+        }
+        armPreview ??= dynamics.CreateOverviewPreview(overviewCamera);
+        armPreview.SetAngles(presentation.previewJointDegrees);
     }
 
     /// <summary>
@@ -268,7 +369,7 @@ public abstract class SpatialSimulationBase : MonoBehaviour
     /// <summary>
     /// 按输入摆放目标器、追踪器、机械臂和传感器，给几何计算准备当前场景。
     /// 两器根节点及七关节取原生样本，再沿用现有敏感器、日照和总览计算。
-    /// 关节角以度绕各关节局部 +Z 叠加到初始旋转。传感器的 mount 选择所属父物体，modelSurface 还要求找到匹配的安装点。
+    /// 传感器的 mount 选择所属父物体，modelSurface 还要求找到匹配的安装点。
     /// 没找到有效组合时先回退到默认组合；如果默认组合也缺失就报错，不继续设置。
     /// </summary>
     private void ApplyState()
@@ -465,17 +566,18 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         {
             if (!view.gameObject.activeInHierarchy || view.transform == null) continue;
             SpatialSensorConfig sensorConfig = FindSensorConfig(view.sensorId);
-            SpatialCraftAssembly sensorTarget = ResolveSensorTarget(sensorConfig, activeTarget,
+            SpatialCraftAssembly sensorTarget = ResolveSensorTarget(sensorConfig, activeTarget, activeChaser,
                 out Transform targetFeature, out Renderer[] targetRenderers, out bool targetResolved,
                 out bool useCraftSurfaceSamples, out Transform targetFeatureToIgnore);
             Vector3[] points = useCraftSurfaceSamples
                 ? TargetCraftSurfaceSamplePoints(targetRenderers, targetFeature, view.transform.position)
-                : TargetSamplePoints(targetFeature);
+                : TargetSamplePoints(targetFeature, TargetHalfSpan(sensorConfig, targetFeature, sensorTarget));
             view.latest = view.Calculate(targetFeature, points, sunDirection, earthShadow,
                                          activeChaser.transform.rotation, message.seq, activeChaser.armJoints,
                                          targetRenderers, sensorConfig?.targetId ?? "ACTIVE_TARGET",
                                          sensorTarget.craftId, targetResolved, targetFeatureToIgnore,
                                          useCraftSurfaceSamples ? "surface" : "marker");
+            if (native != null) forecast?.Fill(view.latest, native.timeSec);
             results.Add(view.latest);
         }
         message.sensors = results.ToArray();
@@ -495,7 +597,7 @@ public abstract class SpatialSimulationBase : MonoBehaviour
     /// ACTIVE_TARGET 和 DOCK-TARGET 沿用活动目标；其他 ID 首先匹配活动飞行器，再查部件名或 partId。
     /// 查不到会回退到活动目标，同时把 targetResolved 置为 false；首选对接标靶，无标靶时用机体包围盒采样。
     /// </summary>
-    private SpatialCraftAssembly ResolveSensorTarget(SpatialSensorConfig config, SpatialCraftAssembly activeTarget,
+    private static SpatialCraftAssembly ResolveSensorTarget(SpatialSensorConfig config, SpatialCraftAssembly activeTarget, SpatialCraftAssembly activeChaser,
                                                       out Transform targetFeature, out Renderer[] targetRenderers,
                                                       out bool targetResolved, out bool useCraftSurfaceSamples,
                                                       out Transform targetFeatureToIgnore)
@@ -507,14 +609,19 @@ public abstract class SpatialSimulationBase : MonoBehaviour
         useCraftSurfaceSamples = false;
         targetFeatureToIgnore = null;
         string targetId = config != null ? config.targetId : null;
+        if (targetId == GrappleTargetId && activeTarget.grappleDatum != null)
+        {
+            targetFeature = activeTarget.grappleDatum;
+            targetFeatureToIgnore = targetFeature.parent;
+            targetRenderers = targetFeatureToIgnore.GetComponentsInChildren<Renderer>();
+            return activeTarget;
+        }
         if (!string.IsNullOrEmpty(targetId) && targetId != "ACTIVE_TARGET" && targetId != "DOCK-TARGET")
         {
-            if (craftById.TryGetValue(targetId, out SpatialCraftAssembly configuredTarget)
-                && configuredTarget != null && configuredTarget.gameObject.activeInHierarchy)
-                selectedCraft = configuredTarget;
-            else
+            if (targetId == activeChaser.craftId) selectedCraft = activeChaser;
+            else if (targetId != activeTarget.craftId)
             {
-                foreach (SpatialCraftAssembly assembly in craft)
+                foreach (SpatialCraftAssembly assembly in new[] { activeChaser, activeTarget })
                 {
                     if (assembly == null || !assembly.gameObject.activeInHierarchy) continue;
                     foreach (Transform candidate in assembly.GetComponentsInChildren<Transform>(true))
@@ -598,15 +705,21 @@ public abstract class SpatialSimulationBase : MonoBehaviour
 
     /// <summary>
     /// 在标靶平面上放九个测试点，供视场和遮挡逐点检查。
-    /// 中心是标靶世界位置，右、上方向分别取 −0.28、0、0.28 米的偏移；这不是根据模型网格自动量出的尺寸。
+    /// 对接靶标固定半跨距 0.28 m。捕获座按其示意标记配置取样，坐标单位为 m。
     /// </summary>
-    private static Vector3[] TargetSamplePoints(Transform target)
+    private static Vector3[] TargetSamplePoints(Transform target, float halfSpan = 0.28f)
     {
         Vector3 center = target.position;
-        Vector3 right = target.right * 0.28f;
-        Vector3 up = target.up * 0.28f;
+        Vector3 right = target.right * halfSpan;
+        Vector3 up = target.up * halfSpan;
         return new[] { center, center + right, center - right, center + up, center - up,
                        center + right + up, center + right - up, center - right + up, center - right - up };
+    }
+
+    private static float TargetHalfSpan(SpatialSensorConfig config, Transform feature, SpatialCraftAssembly craft)
+    {
+        return config?.targetId == GrappleTargetId && feature == craft.grappleDatum
+            && IsFinite(config.sampleRadiusM) && config.sampleRadiusM > 0f ? config.sampleRadiusM : 0.28f;
     }
 
     private static bool IsFinite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);

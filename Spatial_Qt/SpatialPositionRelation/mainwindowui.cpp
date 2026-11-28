@@ -16,6 +16,8 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSlider>
+#include <QSignalBlocker>
+#include <cmath>
 #include <QSplitter>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -78,8 +80,8 @@ void MainWindow::buildUi()
     auto *motionLayout = new QVBoxLayout(motionTab);
     motionLayout->setContentsMargins(8, 8, 8, 8);
     auto *pairForm = new QFormLayout;
-    pairForm->addRow("己方（机械臂与敏感器）", new QLabel("空间站 · 组内参考模型"));
-    pairForm->addRow("目标（初段主动接近）", new QLabel("来访器 · 同组参考模型"));
+    pairForm->addRow("己方（机械臂与敏感器）", new QLabel("空间站 · 参考模型"));
+    pairForm->addRow("目标（初段主动接近）", new QLabel("来访器 · 参考模型"));
     motionLayout->addLayout(pairForm);
 
     auto *distanceGroup = new QGroupBox("相对位置");
@@ -130,13 +132,18 @@ void MainWindow::buildUi()
     connect(m_showRays, &QCheckBox::toggled, m_raySensor, &QWidget::setEnabled);
     rayRow->addWidget(m_raySensor, 1);
     distanceLayout->addLayout(rayRow);
+    m_showSunVector = new QCheckBox("显示太阳矢量方向", distanceGroup);
+    distanceLayout->addWidget(m_showSunVector);
     connect(m_demoButton, &QPushButton::clicked, this, [this] {
         if (m_demoFinished) {
             ++m_demoRunId;
             m_dynamicsEventsShown = 0;
             m_demoFinished = false;
+            m_nativeJointDegrees = {};
         }
         m_demoActive = !m_demoActive;
+        m_demoStarted = true;
+        clearJointPreview();
         m_demoButton->setText(m_demoActive ? "暂停" : "继续");
         startupEvent(m_demoActive ? "dynamics-play" : "dynamics-pause");
         sendState();
@@ -144,6 +151,9 @@ void MainWindow::buildUi()
     connect(resetDemo, &QPushButton::clicked, this, [this] {
         m_demoActive = false;
         m_demoFinished = false;
+        m_demoStarted = false;
+        m_nativeJointDegrees = {};
+        clearJointPreview();
         ++m_demoRunId;
         m_dynamicsEventsShown = 0;
         startupEvent("dynamics-reset");
@@ -157,15 +167,32 @@ void MainWindow::buildUi()
 
     auto *jointGroup = new QGroupBox("机械臂关节角");
     auto *jointLayout = new QGridLayout(jointGroup);
+    m_testJoints = new QCheckBox("测试关节角", jointGroup);
+    m_testJoints->setToolTip("仅在待播放或播放完成时可操作。测试只改变总览中的机械臂画面。");
+    jointLayout->addWidget(m_testJoints, 0, 0, 1, 3);
     for (int i = 0; i < 7; ++i) {
-        auto *value = new QLabel("—");
-        value->setMinimumWidth(46);
-        const int row = i / 4;
-        const int column = (i % 4) * 2;
-        jointLayout->addWidget(new QLabel(QString("J%1").arg(i + 1)), row, column);
-        jointLayout->addWidget(value, row, column + 1);
-        m_jointValueLabels.append(value);
+        const QString name = QString("J%1").arg(i + 1);
+        auto *slider = new QSlider(Qt::Horizontal, jointGroup);
+        slider->setAccessibleName(name + " 角度滑块");
+        slider->setRange(-1800, 1800);
+        slider->setPageStep(100);
+        auto *value = makeSpin(-180, 180, 0.1, 1);
+        value->setAccessibleName(name + " 关节角");
+        value->setSuffix("°");
+        value->setReadOnly(true);
+        value->setButtonSymbols(QAbstractSpinBox::NoButtons);
+        value->setMinimumWidth(65);
+        jointLayout->addWidget(new QLabel(name), i + 1, 0);
+        jointLayout->addWidget(slider, i + 1, 1);
+        jointLayout->addWidget(value, i + 1, 2);
+        m_jointSliders.append(slider);
+        m_jointValues.append(value);
+        connect(slider, &QSlider::valueChanged, this, [this, value](int ticks) {
+            value->setValue(ticks / 10.0);
+            if (m_testJoints->isChecked()) sendPresentation();
+        });
     }
+    updateJointControls();
     motionLayout->addWidget(jointGroup);
     auto *wingGroup = new QGroupBox("帆板", motionTab);
     auto *wingLayout = new QVBoxLayout(wingGroup);
@@ -344,6 +371,12 @@ void MainWindow::connectControls()
     connect(m_manualSolarRole, &QComboBox::currentIndexChanged, this, &MainWindow::sendState);
     connect(m_raySensor, &QComboBox::currentIndexChanged, this, changed);
     connect(m_showRays, &QCheckBox::toggled, this, changed);
+    connect(m_showSunVector, &QCheckBox::toggled, this, &MainWindow::sendPresentation);
+    connect(m_testJoints, &QCheckBox::toggled, this, [this] {
+        displayJointAngles();
+        updateJointControls();
+        sendPresentation();
+    });
     connect(m_solarSlider, &QSlider::valueChanged, this, changed);
     connect(m_solarSlider, &QSlider::sliderReleased, this, [this] {
         m_sendTimer->stop();
@@ -370,6 +403,38 @@ void MainWindow::connectControls()
     connect(m_warningEnabled, &QCheckBox::toggled, this, sensorChanged);
 }
 
+void MainWindow::updateJointControls()
+{
+    const bool available = m_nativeJointDegrees.size() == 7 && (!m_demoStarted || m_demoFinished);
+    m_testJoints->setEnabled(available);
+    for (auto *slider : m_jointSliders) slider->setEnabled(available && m_testJoints->isChecked());
+}
+
+void MainWindow::displayJointAngles()
+{
+    for (int i = 0; i < m_jointSliders.size(); ++i) {
+        auto *slider = m_jointSliders[i];
+        const QSignalBlocker block(slider);
+        const bool hasSample = i < m_nativeJointDegrees.size();
+        auto *value = m_jointValues[i];
+        value->setSpecialValueText(hasSample ? QString() : QStringLiteral("—"));
+        const int ticks = hasSample ? qRound(m_nativeJointDegrees[i].toDouble() * 10.0) : -1800;
+        // Preserve the full native reading, including samples outside the nominal preview span.
+        slider->setRange(qMin(-1800, ticks), qMax(1800, ticks));
+        value->setRange(slider->minimum() / 10.0, slider->maximum() / 10.0);
+        slider->setValue(ticks);
+        value->setValue(ticks / 10.0);
+    }
+}
+
+void MainWindow::clearJointPreview()
+{
+    const QSignalBlocker block(m_testJoints);
+    m_testJoints->setChecked(false);
+    displayJointAngles();
+    updateJointControls();
+}
+
 // 把 Unity 的 telemetry JSON 转成 Qt 表格文字、颜色和悬停提示，不在这里重新做空间射线计算。
 // 只显示当前 demoRunId 对应的轮次；可见率使用可见点数/总目标点数，未来遮挡预警则只在演示时标出。
 // 显示换算交给 TelemetryDisplay::row；当前光照比例在那里乘 100 变百分数，底层 JSON 仍保存 0 到 1 的比例。
@@ -389,9 +454,9 @@ void MainWindow::showTelemetry(const QJsonObject &message)
         m_centerDistanceLabel->setText(meters("centerDistanceM"));
         m_axialGapLabel->setText(meters("axialGapM"));
         m_toolDistanceLabel->setText(meters("toolDistanceM"));
-        const QJsonArray joints = message.value("jointsDeg").toArray();
-        for (int i = 0; i < m_jointValueLabels.size() && i < joints.size(); ++i)
-            m_jointValueLabels[i]->setText(QString::number(joints[i].toDouble(), 'f', 1) + "°");
+        m_nativeJointDegrees = message.value("jointsDeg").toArray();
+        if (!m_testJoints->isChecked()) displayJointAngles();
+        updateJointControls();
         const auto attitudeText = [&native](const QString &name) {
             const auto rotation = native.value(name).toObject().value("rotation").toObject();
             QStringList values;
@@ -429,6 +494,7 @@ void MainWindow::showTelemetry(const QJsonObject &message)
             m_demoActive = false;
             m_demoButton->setText("重播");
             startupEvent("dynamics-finished");
+            updateJointControls();
             sendState();
         }
     } else if (!message.value("dynamicsError").toString().isEmpty()) {
@@ -466,8 +532,8 @@ void MainWindow::showTelemetry(const QJsonObject &message)
         }
         const QString rawStatus = sensor.value("status").toString();
         const bool blocked = rawStatus == "FullyBlocked" || rawStatus == "PartiallyBlocked";
-        const bool future = sensor.value("futureOcclusion").toBool() && m_demoActive;
-        const QStringList fields = TelemetryDisplay::row(sensor, sensorName, message.value("chaserCraftId").toString(), m_demoActive);
+        const bool future = sensor.value("futureOcclusion").toBool();
+        const QStringList fields = TelemetryDisplay::row(sensor, sensorName, message.value("chaserCraftId").toString(), m_demoActive || sensor.value("trajectoryForecastAvailable").toBool());
         const QString illuminationHelp = TelemetryDisplay::illuminationHelp(sensor);
         for (int column = 0; column < fields.size(); ++column) {
             auto *item = m_telemetryTable->item(row, column);

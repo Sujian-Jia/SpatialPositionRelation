@@ -21,13 +21,15 @@ public abstract partial class SpatialSensorViewBase : MonoBehaviour
 
     public string sensorId;
     public Camera sensorCamera;
-    public LineRenderer[] frustumLines = Array.Empty<LineRenderer>();
+    public MeshFilter frustumFilter;
+    public MeshRenderer frustumSurface;
     [NonSerialized] public SpatialSensorConfig configuration;
     [NonSerialized] public SpatialSensorTelemetry latest = new SpatialSensorTelemetry();
     private readonly Dictionary<string, SpatialBlockerData> blockers = new Dictionary<string, SpatialBlockerData>();
 
     private Transform installationPoint;
     private float frustumDistance = 18;
+    public Func<Vector3, Vector3, Transform, bool> ForecastRay { private get; set; }
 
     /// <summary>
     /// 把配置文件里的传感器安装位置、角度和视场套用到当前场景对象。
@@ -127,6 +129,12 @@ public abstract partial class SpatialSensorViewBase : MonoBehaviour
     /// 相机朝本地 +Z；边界公式是 z&gt;0、|x|≤z·tan(水平半视场)、|y|≤z·tan(垂直半视场)。
     /// 离原点小于 0.001 米时直接视为可见，且不更新最近距离；无合格距离时保留正无穷，画线代码另给默认值。
     /// </summary>
+    public Vector2Int CountOcclusion(Vector3[] samplePoints, Transform ignoredGeometry)
+    {
+        MeasureMarkerVisibility(samplePoints, ignoredGeometry, null, out int inView, out int visible, out _);
+        return new Vector2Int(inView, inView - visible);
+    }
+
     internal void MeasureMarkerVisibility(Vector3[] samplePoints, Transform targetFeatureToIgnore,
         Dictionary<string, SpatialBlockerData> identities, out int inFovCount, out int visibleCount, out float minimumDistance)
     {
@@ -145,6 +153,12 @@ public abstract partial class SpatialSensorViewBase : MonoBehaviour
             float distance = ray.magnitude;
             if (distance < 0.001f) { visibleCount++; continue; }
             if (distance < minimumDistance) minimumDistance = distance;
+            if (ForecastRay != null)
+            {
+                Vector3 endpoint = transform.position + ray / distance * Mathf.Max(0, distance - 0.03f);
+                if (!ForecastRay(transform.position, endpoint, targetFeatureToIgnore)) visibleCount++;
+                continue;
+            }
             SpatialOccluderIdentity firstBlocker = FindFirstIdentityBlocker(
                 transform.position, point, distance, targetFeatureToIgnore);
             if (firstBlocker == null) visibleCount++;

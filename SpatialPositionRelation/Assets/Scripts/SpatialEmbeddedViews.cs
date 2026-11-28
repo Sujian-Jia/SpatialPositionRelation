@@ -20,6 +20,7 @@ public sealed class SpatialEmbeddedViews : MonoBehaviour
     private Vector3 overviewOffset = new Vector3(0, 17, -20);
     private float overviewFov = 56;
     public Vector3 SunDisplayPoint { get; set; }
+    public bool ShowSunVector { get; set; }
     private readonly SpatialOverviewLabels labels = new SpatialOverviewLabels();
     private Camera backdrop;
 
@@ -285,7 +286,7 @@ public sealed class SpatialEmbeddedViews : MonoBehaviour
         if (dragEnabled)
             GUI.Box(new Rect(8, Screen.height - 30, 320, 22), "左键拖动环绕 / 中键平移 / 滚轮缩放", panelLabel);
         if (current.type == EventType.Repaint)
-            labels.Draw(overviewCamera, overviewSlot, controls, panelLabel, SunDisplayPoint, sensorViews);
+            labels.Draw(overviewCamera, overviewSlot, controls, panelLabel, SunDisplayPoint, ShowSunVector, sensorViews);
 
         for (int i = 0; i < sensorSlots.Count; i++)
         {

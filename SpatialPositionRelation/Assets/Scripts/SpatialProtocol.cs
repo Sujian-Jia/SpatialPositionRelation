@@ -108,6 +108,15 @@ public sealed class SpatialStateMessage
     public float trajectoryForecastStepSec = 10f;
 }
 
+// Presentation has a separate envelope so state, telemetry and native ABI retain their semantics.
+[Serializable]
+public sealed class SpatialPresentationMessage
+{
+    public int demoRunId;
+    public bool showSunVector;
+    public float[] previewJointDegrees;
+}
+
 /// <summary>
 /// 记录轨迹上某个仿真时刻的相对位置与姿态。
 /// tSec 用秒，relativePositionM 用米，relativeEulerDeg 用度；对接演示的位置分量对应目标口的右、上、前轴。
@@ -169,7 +178,8 @@ public sealed class SpatialSensorTelemetry
     public float normalizedIllumination;
     public bool warning;
     public string recommendation;
-    public bool trajectoryForecastAvailable;
+    public bool trajectoryForecastAvailable, trajectoryForecastComplete;
+    public float trajectoryForecastThroughSec;
     public float trajectoryForecastWindowSec;
     public float trajectoryForecastSampleSec;
     public float trajectoryForecastBlockedSec;
@@ -299,6 +309,8 @@ public sealed class SpatialDynamicsTelemetry
     public Pose[] jointFrames, appliedJointFrames;
     public Vector3 grapple, stationPortVelocity, visitorPortVelocity, stationCenterVelocity, visitorCenterVelocity;
     public Vector3 appliedStationPort, appliedVisitorPort, appliedStationFace, appliedVisitorFace;
+    public Vector3 appliedGripper, appliedGrapple, basePivot, baseFoot, baseSeat, grappleFoot, grappleSeat;
+    public Vector3[] linkStarts, linkEnds;
 }
 
 

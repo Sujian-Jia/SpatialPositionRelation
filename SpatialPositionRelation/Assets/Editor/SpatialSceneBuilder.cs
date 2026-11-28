@@ -158,13 +158,10 @@ public static class SpatialSceneBuilder
             Materials["sun"].color = new Color(1f, 0.72f, 0.32f);
             EditorUtility.SetDirty(Materials["sun"]);
         }
-        Materials["frustum"] = MakeMaterial("SensorFrustum", new Color(0.24f, 0.88f, 0.72f), 0.2f, 0.05f);
-        if (arrowShader != null)
-        {
-            Materials["frustum"].shader = arrowShader;
-            Materials["frustum"].color = new Color(0.27f, 0.96f, 0.65f);
-            EditorUtility.SetDirty(Materials["frustum"]);
-        }
+        Materials["frustum"] = MakeMaterial("SensorFrustum", new Color(0.24f, 0.88f, 0.72f, 0.065f), 0, 0);
+        Materials["frustum"].shader = Shader.Find("Spatial/SensorFrustum");
+        Materials["frustum"].color = new Color(0.24f, 0.88f, 0.72f, 0.065f);
+        EditorUtility.SetDirty(Materials["frustum"]);
         Materials["referenceCraft"] = MakeMaterial("ReferenceSpacecraftFallback", new Color(0.56f, 0.62f, 0.67f), 0.48f, 0.28f);
     }
 
@@ -217,6 +214,7 @@ public static class SpatialSceneBuilder
         assembly.dockingPort = FindDockingAnchor(model.transform);
         assembly.armJoints = FindLongestJointChain(model.transform);
         assembly.armBaseRotations = CaptureLocalRotations(assembly.armJoints);
+        if (id == SpatialDynamicsAdapter.StationId) BakeArmMatingSurfaces(assembly);
         assembly.solarHinges = FindSolarHinges(model.transform);
         assembly.solarBaseRotations = CaptureLocalRotations(assembly.solarHinges);
         assembly.solarLocalAxes = new Vector3[assembly.solarHinges.Length];
@@ -335,6 +333,54 @@ public static class SpatialSceneBuilder
     /// 预制体是一份对象层级模板，InstantiatePrefab 把它放进场景成为实例；从模板加载失败会抛出异常。
     /// 模型先绕 Y 转 90°；最长包围盒边超过 0.001 才按 5.5/最长边同比缩放，再按缩放后的盒中心平移居中。
     /// </summary>
+    // The two long FBX meshes extend *out* from CAD nodes 3 and 4. The elbow actuator
+    // under node 5 provides the short elbow section when registered to the native 7-link sequence.
+    private static void BakeArmMatingSurfaces(SpatialCraftAssembly assembly)
+    {
+        Transform[] cad = assembly.armJoints;
+        if (cad.Length != 7) throw new InvalidOperationException("七轴机械臂缺少 CAD 关节");
+        var entities = new MeshFilter[7];
+        for (int i = 0; i < 7; i++)
+        {
+            var next = i < 6 ? cad[i+1] : null;
+            entities[i] = cad[i].GetComponentsInChildren<MeshFilter>(false).Single(filter =>
+                filter.sharedMesh != null && (next == null || !filter.transform.IsChildOf(next)));
+        }
+        int[] meshIndex = { 0, 1, 4, 2, 3, 5, 6 };
+        int[] sourceEnd = { 0, 1, 4, 3, 4, 5, 6 };
+        assembly.armSourceMeshes = new Transform[7];
+        assembly.armSourceNear = new Vector3[7];
+        assembly.armSourceFar = new Vector3[7];
+        for (int i = 0; i < 7; i++)
+        {
+            MeshFilter filter = entities[meshIndex[i]];
+            int end = sourceEnd[i];
+            Transform from = end == 0 ? cad[0].parent.parent : cad[end-1];
+            Vector3 chord = (cad[end].position - from.position).normalized;
+            Vector3[] vertices = filter.sharedMesh.vertices;
+            Vector3[] worldVertices = vertices.Select(filter.transform.TransformPoint).ToArray();
+            float[] projections = worldVertices.Select(vertex => Vector3.Dot(vertex - from.position, chord)).ToArray();
+            float min = projections.Min(), max = projections.Max();
+            float band = (max - min) * 0.04f;
+            Vector3 near = Vector3.zero, far = Vector3.zero;
+            int nearCount = 0, farCount = 0;
+            for (int j = 0; j < vertices.Length; j++)
+            {
+                if (projections[j] <= min + band) { near += worldVertices[j]; nearCount++; }
+                if (projections[j] >= max - band) { far += worldVertices[j]; farCount++; }
+            }
+            near /= nearCount;
+            far /= farCount;
+            if (i == 6)
+                far = cad[6].GetComponentsInChildren<Transform>(true).Single(part => part.name == "夹爪").position;
+            assembly.armSourceMeshes[i] = filter.transform;
+            assembly.armSourceNear[i] = filter.transform.InverseTransformPoint(near);
+            assembly.armSourceFar[i] = filter.transform.InverseTransformPoint(far);
+            Debug.Log($"SPATIAL_MESH_DATUM link={i+1} part={filter.name} vertices={vertices.Length} " +
+                      $"near={assembly.armSourceNear[i]:F6} far={assembly.armSourceFar[i]:F6} spanM={Vector3.Distance(near,far):F6}");
+        }
+    }
+
     private static GameObject AddReferenceVisual(Transform parent, string path, string craftId)
     {
         GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
@@ -585,22 +631,13 @@ public static class SpatialSceneBuilder
             camera.backgroundColor = new Color(0.012f, 0.02f, 0.032f);
             camera.enabled = false;
             view.sensorCamera = camera;
-            LineRenderer[] lines = new LineRenderer[4];
-            for (int line = 0; line < lines.Length; line++)
-            {
-                GameObject lineObject = new GameObject("FOV_Ray_" + (line + 1));
-                lineObject.layer = overlayLayer;
-                lineObject.transform.SetParent(sensorObject.transform, false);
-                LineRenderer renderer = lineObject.AddComponent<LineRenderer>();
-                renderer.useWorldSpace = true;
-                renderer.positionCount = 2;
-                renderer.startWidth = 0.018f;
-                renderer.endWidth = 0.018f;
-                renderer.sharedMaterial = lineMaterial;
-                renderer.enabled = false;
-                lines[line] = renderer;
-            }
-            view.frustumLines = lines;
+            var frustum = new GameObject("传感器视场锥面");
+            frustum.layer = overlayLayer;
+            frustum.transform.SetParent(cameraObject.transform, false);
+            view.frustumFilter = frustum.AddComponent<MeshFilter>();
+            view.frustumSurface = frustum.AddComponent<MeshRenderer>();
+            view.frustumSurface.sharedMaterial = lineMaterial;
+            view.frustumSurface.enabled = false;
             views[i] = view;
         }
         return views;

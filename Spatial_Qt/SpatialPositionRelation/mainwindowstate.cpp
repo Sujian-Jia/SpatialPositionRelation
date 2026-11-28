@@ -89,7 +89,7 @@ void MainWindow::loadConfig()
                         if (savedSensor.value("localPositionM").toArray() == legacyDefault
                             && savedSensor.value("mount").toString(sensor.value("mount").toString())
                                 == entry.toObject().value("mount").toString())
-                            sensor["localPositionM"] = entry.toObject().value("localPositionM");
+                            sensor["localPositionM"] = QJsonArray{0.0, 0.0, 0.0};
                         else
                             sensor["positionReference"] = "legacyMount";
                     }
@@ -114,6 +114,21 @@ void MainWindow::loadConfig()
                         sensor["name"] = "机械臂腕部相机 B（偏置验证位）";
                     if (sensor.value("targetId").toString() == "DOCK-TARGET")
                         sensor["targetId"] = "ACTIVE_TARGET";
+                    const QJsonObject defaults = entry.toObject();
+                    if (defaults.value("targetId").toString() == "GRAPPLE-FIXTURE"
+                        && sensor.value("targetId").toString() == "ACTIVE_TARGET"
+                        && sensor.value("mount") == defaults.value("mount")
+                        && sensor.value("positionReference") == defaults.value("positionReference")
+                        && sensor.value("localPositionM").toArray() == QJsonArray{0.0, 0.0, 0.0}
+                        && sensor.value("localEulerDeg").toArray() == QJsonArray{0.0, 90.0, 0.0}
+                        && sensor.value("sampleRadiusM").toDouble() == 0.35) {
+                        // 旧版默认的机械臂指向与标靶成套更新，保留用户标定及其他设置。
+                        for (const QString &field : {QStringLiteral("localPositionM"), QStringLiteral("localEulerDeg"),
+                                                     QStringLiteral("targetId"), QStringLiteral("sampleRadiusM")})
+                            sensor[field] = defaults.value(field);
+                    }
+                    if (id == "TV-ARM-ELBOW" && sensor.value("name").toString() == "机械臂肘部云台相机（验证位姿）")
+                        sensor["name"] = defaults.value("name");
                 }
                 mergedSensors.append(sensor);
             }
@@ -131,6 +146,7 @@ void MainWindow::loadConfig()
     m_sensorConfigs = m_config.value("sensors").toArray();
     m_solarSlider->setValue(0);
     m_dynamicsSpeed->setValue(m_config.value("dynamicsSpeed").toDouble(1));
+    m_showSunVector->setChecked(m_config.value("showSunVector").toBool(false));
     const QJsonObject orbit = m_config.value("orbit").toObject();
     const QStringList keys = {"altitudeKm", "eccentricity", "inclinationDeg", "raanDeg",
                               "argPeriapsisDeg", "meanAnomalyDeg", "timeScale"};
@@ -234,6 +250,21 @@ void MainWindow::sendState()
     RuntimeData::appendLog(m_tcpOutLog, line);
 }
 
+void MainWindow::sendPresentation()
+{
+    if (!m_handshake || m_socket->state() != QAbstractSocket::ConnectedState) return;
+    QJsonObject message{{"protocol", "SPR/1"}, {"type", "presentation"},
+        {"demoRunId", m_demoRunId}, {"showSunVector", m_showSunVector->isChecked()}};
+    if (m_testJoints->isEnabled() && m_testJoints->isChecked()) {
+        QJsonArray preview;
+        for (auto *slider : m_jointSliders) preview.append(slider->value() / 10.0);
+        message["previewJointDegrees"] = preview;
+    }
+    const QByteArray line = QJsonDocument(message).toJson(QJsonDocument::Compact) + '\n';
+    m_socket->write(line);
+    RuntimeData::appendLog(m_tcpOutLog, line);
+}
+
 // 解开 Unity 发来的一行 JSON，根据 type 分派 ready、firstFrame、telemetry、sensorFrame 和视图设置事件。
 // ready 时比对实例令牌，令牌相同才标记握手完成并开始发送状态；不匹配则中断连接。
 // 传感器帧另交保存流程，遥测另交界面表格；JSON 解析失败或协议不符就丢弃。
@@ -258,6 +289,7 @@ void MainWindow::receiveMessage(const QByteArray &line)
             startupEvent("first-frame", message.value("firstFrameUtc").toString());
         }
         sendState();
+        sendPresentation();
         updateStartupStatus();
         return;
     }
@@ -308,7 +340,8 @@ void MainWindow::saveConfig()
 {
     if (!requireWritableData()) return;
     const QString path = appDataPath("config/user_config.json");
-    const QJsonObject state = currentState();
+    QJsonObject state = currentState();
+    state["showSunVector"] = m_showSunVector->isChecked();
     if (!RuntimeData::saveJson(path, state)) {
         QMessageBox::warning(this, "保存失败", "无法写入参数文件：\n" + QDir(m_dataRoot).filePath("config/user_config.json"));
         return;

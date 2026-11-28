@@ -61,6 +61,10 @@ private:
     void startupFailure(const QString &reason);
     void finishUnityCleanup();
     void sendState();
+    void sendPresentation();
+    void updateJointControls();
+    void displayJointAngles();
+    void clearJointPreview();
     // 读取界面当前值并拼成一份状态快照。
     QJsonObject currentState() const;
     // 处理 Unity 回来的一整行 JSON。
@@ -125,6 +129,8 @@ private:
     bool m_chaserHasWings = false;
     QPushButton *m_demoButton = nullptr;
     QCheckBox *m_showRays = nullptr;
+    QCheckBox *m_showSunVector = nullptr;
+    QCheckBox *m_testJoints = nullptr;
     QCheckBox *m_manualSolarDiagnostic = nullptr;
     QComboBox *m_manualSolarRole = nullptr;
     QComboBox *m_raySensor = nullptr;
@@ -132,11 +138,14 @@ private:
     QJsonObject m_defaultConfig;
     bool m_demoActive = false;
     bool m_demoFinished = false;
+    bool m_demoStarted = false;
     int m_demoRunId = 0;
     int m_dynamicsEventsShown = 0;
     QComboBox *m_sensorCombo = nullptr;
     QSlider *m_solarSlider = nullptr;
-    QVector<QLabel *> m_jointValueLabels;
+    QVector<QSlider *> m_jointSliders;
+    QVector<QDoubleSpinBox *> m_jointValues;
+    QJsonArray m_nativeJointDegrees;
     QVector<QDoubleSpinBox *> m_orbitSpins;
     QDateTimeEdit *m_epochUtcEdit = nullptr;
     QDoubleSpinBox *m_fovHorizontal = nullptr;

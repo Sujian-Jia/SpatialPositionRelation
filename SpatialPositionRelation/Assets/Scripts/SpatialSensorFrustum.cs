@@ -1,9 +1,5 @@
 using UnityEngine;
 
-/// <summary>
-/// 单独实现传感器视锥线框的绘制；几何计算和数据统计在同类的另一部分。
-/// partial 将类拆进多个文件，但它们仍属于同一个 C# 类型。
-/// </summary>
 public abstract partial class SpatialSensorViewBase
 {
     public bool ShowRays { get; set; }
@@ -12,51 +8,69 @@ public abstract partial class SpatialSensorViewBase
         Mathf.Tan(Mathf.Clamp(configuration.horizontalFovDeg, 1, 179) * Mathf.Deg2Rad * 0.5f)
         / Mathf.Tan(Mathf.Clamp(configuration.verticalFovDeg, 1, 179) * Mathf.Deg2Rad * 0.5f);
 
-    /// <summary>
-    /// 在 Unity 每帧稍晚阶段重画视锥线，跟上相机或父物体本帧的位置变化。
-    /// LateUpdate 是生命周期钩子，通常在 Update 之后执行，不代表独立线程。
-    /// </summary>
-    private void LateUpdate()
+    private const int ConeSegments = 64;
+    private static readonly int[] ConeFaces = CreateConeFaces();
+    private readonly Vector3[] coneVertices = new Vector3[ConeSegments + 1];
+    private Mesh frustumMesh;
+    private Vector3 previousFrustumSize;
+
+    private void LateUpdate() => DrawFrustum();
+
+    private void OnDestroy()
     {
-        DrawFrustum();
+        if (frustumMesh != null) Destroy(frustumMesh);
     }
 
-    /// <summary>
-    /// 用相机位置、方向和水平/垂直视场生成四条视锥边线。
-    /// 距离无穷时用 18 米，绘制长度再限制在 4 至 50 米；半宽 x=L·tan(水平半视场)，半高 y=L·tan(垂直半视场)。
-    /// 不显示射线或缺配置时禁用线；配置有效时四个角点在相机本地的 z=L 平面上，再旋转和平移到世界坐标。
-    /// 遥测的 frustumVertex 读第一条线的起点（即视锥原点），不是远端角点。
-    /// </summary>
     public void DrawFrustum()
     {
-        float distance = frustumDistance;
-        if (frustumLines == null || frustumLines.Length < 4) return;
-        if (!ShowRays || configuration == null)
-        {
-            foreach (LineRenderer line in frustumLines)
-                if (line != null) line.enabled = false;
-            return;
-        }
-        float length = Mathf.Clamp(float.IsInfinity(distance) ? 18 : distance, 4, 50);
+        if (frustumFilter == null || frustumSurface == null) return;
+        frustumSurface.enabled = ShowRays && configuration != null;
+        if (!frustumSurface.enabled) return;
+        float length = Mathf.Clamp(float.IsInfinity(frustumDistance) ? 18 : frustumDistance, 4, 50);
         float x = length * Mathf.Tan(configuration.horizontalFovDeg * Mathf.Deg2Rad * 0.5f);
         float y = length * Mathf.Tan(configuration.verticalFovDeg * Mathf.Deg2Rad * 0.5f);
-        Transform opticalCenter = sensorCamera != null ? sensorCamera.transform : transform;
-        Vector3 origin = opticalCenter.position;
-        Vector3[] corners = {
-            origin + opticalCenter.rotation * new Vector3(-x, -y, length), origin + opticalCenter.rotation * new Vector3(x, -y, length),
-            origin + opticalCenter.rotation * new Vector3(x, y, length), origin + opticalCenter.rotation * new Vector3(-x, y, length)};
-        for (int i = 0; i < 4; i++)
+        Vector3 size = new Vector3(x, y, length);
+        bool create = frustumMesh == null;
+        if (create)
         {
-            if (frustumLines[i] == null) continue;
-            frustumLines[i].SetPosition(0, origin);
-            frustumLines[i].SetPosition(1, corners[i]);
-            frustumLines[i].enabled = true;
+            frustumMesh = new Mesh { name = "Open sensor cone" };
+            frustumFilter.sharedMesh = frustumMesh;
+        }
+        if (create || size != previousFrustumSize)
+        {
+            // The surface is under the optical camera, but the legacy lengths are world metres.
+            Transform meshSpace = frustumFilter.transform;
+            // Retain the horizontal/vertical edge angles and axial range of the original overlay.
+            // Equal angles make a circle. Different angles make an ellipse with those same half-axes.
+            for (int i = 0; i < ConeSegments; i++)
+            {
+                float angle = i * (2f * Mathf.PI / ConeSegments);
+                coneVertices[i + 1] = ToMeshSpace(meshSpace,
+                    new Vector3(x * Mathf.Cos(angle), y * Mathf.Sin(angle), length));
+            }
+            frustumMesh.vertices = coneVertices;
+            if (create) frustumMesh.triangles = ConeFaces;
+            frustumMesh.RecalculateBounds();
+            previousFrustumSize = size;
         }
         if (latest != null)
         {
-            latest.frustumVertex = frustumLines[0] != null ? frustumLines[0].GetPosition(0) : origin;
-            latest.frustumOriginErrorM = Vector3.Distance(latest.frustumVertex, origin);
+            latest.frustumVertex = frustumFilter.transform.position;
+            latest.frustumOriginErrorM = Vector3.Distance(latest.frustumVertex, sensorCamera.transform.position);
         }
     }
 
+    private static int[] CreateConeFaces()
+    {
+        var triangles = new int[3 * ConeSegments];
+        for (int i = 0; i < ConeSegments; i++)
+        {
+            triangles[3 * i + 1] = i + 1;
+            triangles[3 * i + 2] = (i + 1) % ConeSegments + 1;
+        }
+        return triangles;
+    }
+
+    private static Vector3 ToMeshSpace(Transform meshSpace, Vector3 opticalMetres) =>
+        meshSpace.InverseTransformVector(meshSpace.rotation * opticalMetres);
 }

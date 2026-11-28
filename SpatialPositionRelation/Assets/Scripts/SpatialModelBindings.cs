@@ -36,6 +36,10 @@ public abstract class SpatialCraftAssemblyBase : MonoBehaviour
     /// </summary>
     public Transform demoDockPort;
     public Transform referenceVisual, dynamicsPort;
+    public Transform armBaseSeat, armBaseFoot, armBasePivot, armTool, gripperDatum, grappleDatum, grappleSeat, grappleFoot;
+    public Transform[] armLinkCarriers, armLinkSeats, armLinkTips;
+    public Transform[] armSourceMeshes;
+    public Vector3[] armSourceNear, armSourceFar;
     public Transform[] armJoints = Array.Empty<Transform>();
     public Quaternion[] armBaseRotations = Array.Empty<Quaternion>();
     public Transform armElbow;

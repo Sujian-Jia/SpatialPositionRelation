@@ -1,5 +1,6 @@
 {
   "dynamicsSpeed": 1.0,
+  "showSunVector": false,
   "viewSensorId": "",
   "overviewMode": "fixed",
   "displaySensorIds": ["CRDS-PORT", "TV-DOCK-WIDE"],
@@ -70,14 +71,14 @@
       "enabled": true,
       "mount": "ArmWrist",
       "positionReference": "modelSurface",
-      "localPositionM": [0.0, 0.0, 0.0],
-      "localEulerDeg": [0.0, 90.0, 0.0],
+      "localPositionM": [0.022, 0.0, 0.014],
+      "localEulerDeg": [1.1, -24.9, 0.0],
       "horizontalFovDeg": 55.0,
       "verticalFovDeg": 55.0,
       "warningEnabled": true,
       "warningThreshold": 0.3,
-      "targetId": "ACTIVE_TARGET",
-      "sampleRadiusM": 0.35
+      "targetId": "GRAPPLE-FIXTURE",
+      "sampleRadiusM": 0.015
     },
     {
       "id": "TV-ARM-WRIST-B",
@@ -86,30 +87,30 @@
       "enabled": true,
       "mount": "ArmWrist",
       "positionReference": "modelSurface",
-      "localPositionM": [0.0, 0.0, 0.0],
-      "localEulerDeg": [0.0, 90.0, 0.0],
+      "localPositionM": [0.0, -0.02, -0.01],
+      "localEulerDeg": [8.7, -8.7, 0.0],
       "horizontalFovDeg": 55.0,
       "verticalFovDeg": 55.0,
       "warningEnabled": false,
       "warningThreshold": 0.3,
-      "targetId": "ACTIVE_TARGET",
-      "sampleRadiusM": 0.35
+      "targetId": "GRAPPLE-FIXTURE",
+      "sampleRadiusM": 0.015
     },
     {
       "id": "TV-ARM-ELBOW",
-      "name": "机械臂肘部云台相机（验证位姿）",
+      "name": "机械臂肘部相机（固定工作区）",
       "kind": "TV",
       "enabled": true,
       "mount": "ArmElbow",
       "positionReference": "modelSurface",
       "localPositionM": [0.0, 0.0, 0.0],
-      "localEulerDeg": [0.0, 90.0, 0.0],
+      "localEulerDeg": [10.0, 105.0, 0.0],
       "horizontalFovDeg": 55.0,
       "verticalFovDeg": 55.0,
       "warningEnabled": false,
       "warningThreshold": 0.3,
-      "targetId": "ACTIVE_TARGET",
-      "sampleRadiusM": 0.35
+      "targetId": "GRAPPLE-FIXTURE",
+      "sampleRadiusM": 0.015
     }
   ]
 }

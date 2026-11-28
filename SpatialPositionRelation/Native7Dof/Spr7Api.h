@@ -27,6 +27,11 @@ typedef struct Spr7Frame {
 
 SPR7_API int32_t Spr7_Abi(void);
 SPR7_API void* Spr7_Create(void);
+// Independent, exact session snapshot including the clock, constraints and contact history.
+SPR7_API void* Spr7_Clone(const void* session);
+// Constant arm calibration frames: station-local mount pose, visitor-local grapple point,
+// followed by seven link-local rest offsets from the native parameter set.
+SPR7_API int32_t Spr7_ReadCalibration(const void* session, double* values, int32_t valueCount);
 SPR7_API void Spr7_Destroy(void* session);
 // Advance up to maxSteps times at the native fixed step. Stops at the next
 // 20-step sampling boundary. Returns actual steps, 0 at EOF, or -1 on failure.

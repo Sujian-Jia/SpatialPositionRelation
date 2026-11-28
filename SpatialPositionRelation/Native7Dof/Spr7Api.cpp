@@ -37,6 +37,23 @@ void* Spr7_Create() {
     catch (...) { return nullptr; }
 }
 
+void* Spr7_Clone(const void* handle) {
+    if (!handle) return nullptr;
+    try { return new Session(*static_cast<const Session*>(handle)); }
+    catch (...) { return nullptr; }
+}
+
+int32_t Spr7_ReadCalibration(const void* handle, double* values, int32_t valueCount) {
+    if (!handle || !values || valueCount != 31) return -1;
+    const auto& p = static_cast<const Session*>(handle)->model.Parameters();
+    const auto q = DockingDynamics::RotationToQuaternion(p.armBaseRotation);
+    std::copy_n(p.armMount.data(), 3, values);
+    std::copy_n(q.data(), 4, values + 3);
+    std::copy_n(p.visitorGrapple.data(), 3, values + 7);
+    for (int i = 0; i < 7; ++i) std::copy_n(p.armOffsets[i].data(), 3, values + 10 + 3*i);
+    return 0;
+}
+
 void Spr7_Destroy(void* session) { delete static_cast<Session*>(session); }
 
 int32_t Spr7_Advance(void* handle, int32_t maxSteps) {

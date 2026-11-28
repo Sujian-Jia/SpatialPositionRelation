@@ -38,6 +38,8 @@ class Frame(c.Structure):
 def compare_session():
     lib = c.CDLL(str(build / 'mingw/libSpatialNative7Dof.dll'))
     lib.Spr7_Create.restype = c.c_void_p
+    lib.Spr7_Clone.argtypes = [c.c_void_p]
+    lib.Spr7_Clone.restype = c.c_void_p
     lib.Spr7_Advance.argtypes = [c.c_void_p, c.c_int32]
     lib.Spr7_Read.argtypes = [c.c_void_p, c.POINTER(Frame), c.c_int32]
     lib.Spr7_Destroy.argtypes = [c.c_void_p]
@@ -51,9 +53,13 @@ def compare_session():
     mode_drift = []
     closure = dict(port_position=0., port_speed=0., center_speed_difference=0.)
     snapshots = {}
+    fork = None
+    fork_frame = Frame()
+    fork_matches = 0
+    preadvanced = False
     try:
         for index, expected in enumerate(rows(reference / 'results_arm_composite.csv')):
-            if index:
+            if index and not preadvanced:
                 # Variable batch sizes exercise paused / resumed scheduling at a sample boundary.
                 steps = 0
                 while steps < 20:
@@ -61,7 +67,24 @@ def compare_session():
                     assert count > 0
                     steps += count
                 assert steps == 20
+            preadvanced = False
             assert lib.Spr7_Read(session, c.byref(frame), c.sizeof(frame)) == 0
+            if index == 335:  # 6.700 s, before the capture transition during contact
+                assert lib.Spr7_Advance(session, 7) == 7
+                fork = lib.Spr7_Clone(session)
+                assert fork and lib.Spr7_Read(fork, c.byref(fork_frame), c.sizeof(fork_frame)) == -1
+                # Run only the fork first. Advancing it must leave the original at step 6707.
+                assert lib.Spr7_Advance(fork, 20) == 13
+                assert lib.Spr7_Read(session, c.byref(fork_frame), c.sizeof(fork_frame)) == -1
+                assert lib.Spr7_Advance(session, 20) == 13
+                assert lib.Spr7_Read(session, c.byref(fork_frame), c.sizeof(fork_frame)) == 0
+                preadvanced = True
+            if index >= 336:
+                if index > 336:
+                    assert lib.Spr7_Advance(fork, 20) == 20
+                assert lib.Spr7_Read(fork, c.byref(fork_frame), c.sizeof(fork_frame)) == 0
+                assert bytes(fork_frame) == bytes(frame), ('clone diverged', index)
+                fork_matches += 1
             assert abs(frame.time - expected['t']) < 1e-9
             if frame.mode != expected['mode']:
                 mode_drift.append([index, frame.mode, expected['mode']])
@@ -83,9 +106,13 @@ def compare_session():
                 events = list(frame.events)
                 snapshots[str(frame.time)] = dict(events=events, mode=frame.mode, tool=list(frame.tool), joints=list(frame.q[7:14]), port_distance=frame.port_distance)
         assert index + 1 == 4001 and lib.Spr7_Advance(session, 20) == 0
+        assert fork_matches == 3665
+        assert lib.Spr7_Advance(fork, 20) == 0
     finally:
+        if fork:
+            lib.Spr7_Destroy(fork)
         lib.Spr7_Destroy(session)
-    return dict(frames=index+1, maximum=maximum, events=events, mode_drift=mode_drift, closure=closure, snapshots=snapshots)
+    return dict(clone_bit_identical_frames=fork_matches, frames=index+1, maximum=maximum, events=events, mode_drift=mode_drift, closure=closure, snapshots=snapshots)
 
 report = {'session': compare_session()}
 for scenario, count in [('arm', 4001), ('station', 1801)]:

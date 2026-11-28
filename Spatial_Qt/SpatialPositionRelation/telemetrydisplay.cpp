@@ -71,6 +71,15 @@ QStringList TelemetryDisplay::row(const QJsonObject &sensor, const QString &name
 {
     const auto status = sensor.value("status").toString();
     const bool future = predicting && sensor.value("futureOcclusion").toBool();
+    QString forecast = "—";
+    if (future) {
+        forecast = QString("预警 %1–%2 s").arg(numeric(sensor.value("futureOcclusionStartSec")),
+                                               numeric(sensor.value("futureOcclusionEndSec")));
+    } else if (predicting && sensor.value("trajectoryForecastComplete").toBool()) {
+        forecast = "至 80 s 无遮挡";
+    } else if (predicting && sensor.value("trajectoryForecastThroughSec").toDouble() > 0) {
+        forecast = QString("已预测至 %1 s").arg(numeric(sensor.value("trajectoryForecastThroughSec")));
+    }
     const QJsonValue totalValue = sensor.value("totalPointCount");
     const int total = totalValue.toInt();
     const int inFov = sensor.value("inFovCount").toInt();
@@ -87,7 +96,7 @@ QStringList TelemetryDisplay::row(const QJsonObject &sensor, const QString &name
     if (sensor.value("warning").toBool()) recommendation.prepend("光照告警 · ");
     const bool lightAvailable = sensor.value("illuminationAvailable").toBool(true);
     return {name, fieldOfView, status == "FullyBlocked" ? "完全遮挡" : status == "PartiallyBlocked" ? "部分遮挡" : "—",
-        future ? QString("预警 %1–%2").arg(numeric(sensor.value("futureOcclusionStartSec")), numeric(sensor.value("futureOcclusionEndSec"))) : "—",
+        forecast,
         points, numeric(sensor.value("targetAreaInFovRatio"), 100, 0) + " / " + numeric(sensor.value("visibleTargetAreaRatio"), 100, 0),
         lightAvailable ? numeric(sensor.value("sunIncidenceDeg")) : "无数据",
         lightAvailable ? numeric(sensor.value("normalizedIllumination"), 100) : "无数据",

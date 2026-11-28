@@ -1,5 +1,7 @@
 using System;
 using System.Diagnostics;
+using System.Collections.Concurrent;
+using System.Threading;
 using System.Runtime.InteropServices;
 using UnityEngine;
 
@@ -8,9 +10,11 @@ public sealed class SpatialDynamicsAdapter : IDisposable
 {
     public const string StationId = "SpaceStation";
     public const string VisitorId = "CrewVehicle";
-    private const double Step = 0.001;
-    private const int SampleSteps = 20;
-    private const int TotalSteps = 80000;
+    internal const double Step = 0.001;
+    internal const int SampleSteps = 20;
+    internal const int TotalSteps = 80000;
+    public const double EndTime = TotalSteps * Step;
+    public const double SampleSeconds = SampleSteps * Step;
     private const int FrameCount = 168;
     private const string Library = "SpatialNative7Dof";
     private const int TimeIndex = 0, Mode = 1, Q = 2, U = 41;
@@ -20,7 +24,10 @@ public sealed class SpatialDynamicsAdapter : IDisposable
 
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern int Spr7_Abi();
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr Spr7_Create();
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr Spr7_Clone(IntPtr session);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern void Spr7_Destroy(IntPtr session);
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int Spr7_ReadCalibration(IntPtr session, [Out] double[] values, int count);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)] private static extern int Spr7_Advance(IntPtr session, int maxSteps);
     [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
     private static extern int Spr7_Read(IntPtr session, [Out] double[] frame, int frameBytes);
@@ -31,51 +38,13 @@ public sealed class SpatialDynamicsAdapter : IDisposable
     private readonly double[] frame = new double[FrameCount];
     private readonly SpatialCraftAssembly station;
     private readonly SpatialCraftAssembly visitor;
-    private readonly Transform toolFrame;
-    private readonly Transform grappleFrame;
-    private readonly Transform gripperVisual;
-    private readonly Quaternion gripperOffset;
-    private readonly VisualSegment[] armSegments = new VisualSegment[6];
     private readonly Pose[] armPoses = new Pose[7];
+    private readonly Vector3[] restOffsets = new Vector3[7];
+    private readonly Vector3[] restScales = new Vector3[7];
+    private readonly Pose stationMount;
+    private readonly Vector3 visitorGrapple;
 
-    // The CAD chains store incoming offsets; the native link frame owns the following segment.
-    // Keep joint/camera nodes on native frames and register the six imported rigid link meshes separately.
-    private sealed class VisualSegment
-    {
-        private readonly Transform mount;
-        private readonly float sourceLength;
-
-        public VisualSegment(Transform armRoot, Transform from, Transform to)
-        {
-            Vector3 axis = to.position - from.position;
-            sourceLength = axis.magnitude;
-            if (sourceLength < 1e-5f) throw new InvalidOperationException("参考机械臂包含零长度臂段");
-            mount = new GameObject("参考臂段 " + from.name).transform;
-            mount.SetParent(armRoot, false);
-            mount.SetPositionAndRotation(from.position, SegmentRotation(axis, from.rotation));
-            for (int i = from.childCount - 1; i >= 0; i--)
-            {
-                Transform child = from.GetChild(i);
-                if (child != to && child.GetComponentInChildren<Renderer>(true) != null)
-                    child.SetParent(mount, true);
-            }
-            if (mount.childCount == 0) throw new InvalidOperationException("参考机械臂段缺少网格：" + from.name);
-        }
-
-        public void Apply(Pose from, Vector3 to)
-        {
-            Vector3 axis = to - from.position;
-            mount.SetPositionAndRotation(from.position, SegmentRotation(axis, from.rotation));
-            mount.localScale = new Vector3(1, 1, axis.magnitude / sourceLength);
-        }
-
-        private static Quaternion SegmentRotation(Vector3 axis, Quaternion joint)
-        {
-            Vector3 up = Vector3.ProjectOnPlane(joint * Vector3.forward, axis);
-            if (up.sqrMagnitude < 1e-6f) up = Vector3.ProjectOnPlane(joint * Vector3.up, axis);
-            return Quaternion.LookRotation(axis, up);
-        }
-    }
+    public double TimeSec => frame[TimeIndex];
     public bool Finished => steps == TotalSteps;
     public float[] JointDegrees { get; } = new float[7];
 
@@ -86,39 +55,129 @@ public sealed class SpatialDynamicsAdapter : IDisposable
         if (station.armJoints.Length != 7 || visitor.armJoints.Length != 7)
             throw new InvalidOperationException("参考装配缺少七关节绑定");
         if (Spr7_Abi() != 1) throw new InvalidOperationException("7DOF 接口版本不匹配");
-        // Bind the copied CAD gripper and its actual renderer, downstream of J7.
-        Transform wrist = station.armJoints[6];
-        foreach (Transform part in wrist.GetComponentsInChildren<Transform>(true))
-            if (part.name == "夹爪") { gripperVisual = part; break; }
-        if (gripperVisual == null) throw new InvalidOperationException("参考装配缺少 J7 的夹爪部件");
-        Renderer[] jaws = gripperVisual.GetComponentsInChildren<Renderer>(true);
-        if (jaws.Length == 0) throw new InvalidOperationException("参考夹爪缺少网格");
-        Bounds jawBounds = jaws[0].bounds;
-        foreach (Renderer jaw in jaws) jawBounds.Encapsulate(jaw.bounds);
-        Vector3 normal = (jawBounds.center - wrist.position).normalized;
-        Vector3 edge = jawBounds.center + normal * Vector3.Dot(jawBounds.extents,
-            new Vector3(Mathf.Abs(normal.x), Mathf.Abs(normal.y), Mathf.Abs(normal.z)));
-        Vector3 gripperContactLocal = gripperVisual.InverseTransformPoint(edge);
-        Vector3 up = Vector3.ProjectOnPlane(gripperVisual.up, normal);
-        if (up.sqrMagnitude < 1e-5f) up = Vector3.ProjectOnPlane(gripperVisual.right, normal);
-        Quaternion sourceContact = Quaternion.LookRotation(-normal, up);
-        toolFrame = new GameObject("7DOF 夹爪接触参考系").transform;
-        toolFrame.SetParent(gripperVisual, false);
-        toolFrame.localPosition = gripperContactLocal;
-        gripperOffset = Quaternion.Inverse(sourceContact) * gripperVisual.rotation;
-        toolFrame.localRotation = Quaternion.Inverse(gripperOffset);
-        grappleFrame = visitor.dockingPort;
-        for (int i = 0; i < armSegments.Length; i++)
-            armSegments[i] = new VisualSegment(station.transform, station.armJoints[i], station.armJoints[i + 1]);
-        visitor.armJoints[0].gameObject.SetActive(false);
-        foreach (SpatialOccluderIdentity identity in visitor.GetComponentsInChildren<SpatialOccluderIdentity>(true))
-            if (identity.category == "SelfArm") identity.gameObject.SetActive(false);
-        Reset();
-        SetPose(station.transform, ReadPose(frame, Q));
-        SetPose(visitor.transform, ReadPose(frame, Q + 32));
-        AlignVisualPort(station, ReadPose(frame, StationPort), Vector3.right);
-        AlignVisualPort(visitor, ReadPose(frame, VisitorPort), Vector3.left);
+        try
+        {
+            Reset();
+            var calibration = new double[31];
+            if (Spr7_ReadCalibration(session, calibration, calibration.Length) != 0)
+                throw new InvalidOperationException("7DOF 装配基准读取失败");
+            stationMount = ReadPose(calibration, 0);
+            visitorGrapple = Polar(calibration, 7);
+            for (int i = 0; i < restOffsets.Length; i++) restOffsets[i] = Polar(calibration, 10 + 3*i);
+            SetPose(station.transform, ReadPose(frame, Q));
+            SetPose(visitor.transform, ReadPose(frame, Q + 32));
+            AlignVisualPort(station, ReadPose(frame, StationPort), Vector3.right);
+            AlignVisualPort(visitor, ReadPose(frame, VisitorPort), Vector3.left);
+            Physics.SyncTransforms();
+            SpatialArmCalibration.Register(station, visitor, stationMount, visitorGrapple, restOffsets);
+            for (int i = 0; i < restScales.Length; i++) restScales[i] = station.armLinkCarriers[i].localScale;
+            Apply();
+        }
+        catch
+        {
+            Dispose();
+            throw;
+        }
+    }
+
+    public ForecastSamples Fork() => new ForecastSamples(session, frame, steps);
+
+    // Reflection of the native axial +Z is Unity +Z. Preview deltas are applied
+    // in the post-joint local frames of a render-only copy of the calibrated assembly.
+    internal SpatialArmPreview CreateOverviewPreview(Camera camera) =>
+        new SpatialArmPreview(station, camera, JointDegrees, Vector3.forward);
+
+    public SpatialDynamicsAdapter ForForecastGeometry(SpatialCraftAssembly stationCopy, SpatialCraftAssembly visitorCopy)
+        => new SpatialDynamicsAdapter(this, stationCopy, visitorCopy);
+
+    private SpatialDynamicsAdapter(SpatialDynamicsAdapter source, SpatialCraftAssembly station, SpatialCraftAssembly visitor)
+    {
+        this.station = station;
+        this.visitor = visitor;
+        stationMount = source.stationMount;
+        visitorGrapple = source.visitorGrapple;
+        Array.Copy(source.restOffsets, restOffsets, restOffsets.Length);
+        Array.Copy(source.restScales, restScales, restScales.Length);
+    }
+
+    internal void ApplyForecastFrame(double[] sample)
+    {
+        Array.Copy(sample, frame, FrameCount);
         Apply();
+    }
+
+    // Only this worker touches the cloned C++ handle. Unity objects stay on the main thread.
+    public sealed class ForecastSamples : IDisposable
+    {
+        private readonly ConcurrentQueue<double[]> samples = new ConcurrentQueue<double[]>();
+        private readonly object gate = new object();
+        private readonly Thread worker;
+        private readonly IntPtr snapshot;
+        private bool paused, disposed;
+        private int steps;
+        private Exception failure;
+
+        internal ForecastSamples(IntPtr session, double[] lastSample, int steps)
+        {
+            snapshot = Spr7_Clone(session);
+            if (snapshot == IntPtr.Zero) throw new InvalidOperationException("7DOF 无法克隆预测会话");
+            this.steps = steps;
+            samples.Enqueue((double[])lastSample.Clone());
+            worker = new Thread(Rollout) { IsBackground = true, Name = "7DOF forecast" };
+            try { worker.Start(); }
+            catch { Spr7_Destroy(snapshot); throw; }
+        }
+
+        private void Rollout()
+        {
+            try
+            {
+                while (steps < TotalSteps)
+                {
+                    lock (gate)
+                    {
+                        while (paused && !disposed) Monitor.Wait(gate);
+                        if (disposed) return;
+                        int actual = Spr7_Advance(snapshot, SampleSteps);
+                        if (actual <= 0) throw new InvalidOperationException("7DOF 预测样本推进失败");
+                        steps += actual;
+                        var sample = new double[FrameCount];
+                        if (Spr7_Read(snapshot, sample, FrameCount * sizeof(double)) != 0)
+                            throw new InvalidOperationException("7DOF 预测样本读取失败");
+                        samples.Enqueue(sample);
+                    }
+                    // Give a waiting pause/reset control priority at this sample boundary.
+                    Thread.Yield();
+                }
+            }
+            catch (Exception exception) { Volatile.Write(ref failure, exception); }
+            finally { Spr7_Destroy(snapshot); }
+        }
+
+        public bool TryRead(out double[] sample)
+        {
+            var error = Volatile.Read(ref failure);
+            if (error != null) throw new InvalidOperationException(error.Message, error);
+            return samples.TryDequeue(out sample);
+        }
+
+        public void SetPaused(bool value)
+        {
+            lock (gate)
+            {
+                paused = value;
+                if (!paused) Monitor.PulseAll(gate);
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (gate)
+            {
+                disposed = true;
+                Monitor.PulseAll(gate);
+            }
+        }
     }
 
     public void Reset()
@@ -204,14 +263,21 @@ public sealed class SpatialDynamicsAdapter : IDisposable
             SetPose(station.armJoints[i], armPoses[i]);
         }
         Pose tool = ReadPose(frame, Tool);
-        for (int i = 0; i < armSegments.Length; i++)
+        SetPose(station.armTool, tool);
+        // Only the two FE members deform. Their authoritative distal locations are the
+        // following native joint origins, already including the C++ flexible tip deflection.
+        for (int i = 3; i <= 4; i++)
         {
-            int joint = i + 1;
-            armSegments[i].Apply(armPoses[joint], joint + 1 < armPoses.Length ? armPoses[joint + 1].position : tool.position);
+            Vector3 chord = Quaternion.Inverse(armPoses[i].rotation) * (armPoses[i+1].position - armPoses[i].position);
+            Transform carrier = station.armLinkCarriers[i];
+            Vector3 rest = restOffsets[i].normalized;
+            Vector3 current = chord.normalized;
+            Vector3 cross = Vector3.Cross(rest, current);
+            var bend = new Quaternion(cross.x, cross.y, cross.z, 1 + Vector3.Dot(rest, current));
+            carrier.localRotation = bend.normalized * SpatialArmCalibration.NativeChordBasis(restOffsets[i]);
+            carrier.localScale = new Vector3(restScales[i].x, restScales[i].y,
+                restScales[i].z * chord.magnitude / restOffsets[i].magnitude);
         }
-        gripperVisual.rotation = tool.rotation * gripperOffset;
-        gripperVisual.position = tool.position - gripperVisual.TransformVector(toolFrame.localPosition);
-        grappleFrame.position = Polar(frame, Grapple);
     }
 
     public SpatialDynamicsTelemetry Telemetry()
@@ -226,13 +292,21 @@ public sealed class SpatialDynamicsAdapter : IDisposable
             stationPortVelocity = Polar(frame, StationPortVelocity), visitorPortVelocity = Polar(frame, VisitorPortVelocity),
             stationCenterVelocity = Polar(frame, U), visitorCenterVelocity = Polar(frame, U + 31),
             tool = ReadPose(frame, Tool), grapple = Polar(frame, Grapple),
-            appliedTool = new Pose(toolFrame.position, toolFrame.rotation),
+            appliedTool = new Pose(station.armTool.position, station.armTool.rotation),
+            appliedGripper = station.gripperDatum.position, appliedGrapple = visitor.grappleDatum.position,
+            basePivot = station.armBasePivot.position, baseFoot = station.armBaseFoot.position,
+            baseSeat = station.armBaseSeat.position, grappleFoot = visitor.grappleFoot.position, grappleSeat = visitor.grappleSeat.position,
+            linkStarts = new Vector3[7], linkEnds = new Vector3[7],
             jointFrames = (Pose[])armPoses.Clone(), appliedJointFrames = new Pose[armPoses.Length],
             appliedStationPort = station.dynamicsPort.position, appliedVisitorPort = visitor.dynamicsPort.position,
             appliedStationFace = station.demoDockPort.position, appliedVisitorFace = visitor.demoDockPort.position
         };
         for (int i = 0; i < armPoses.Length; i++)
+        {
             result.appliedJointFrames[i] = new Pose(station.armJoints[i].position, station.armJoints[i].rotation);
+            result.linkStarts[i] = station.armLinkSeats[i].position;
+            result.linkEnds[i] = station.armLinkTips[i].position;
+        }
         Array.Copy(frame, Q + 7, result.jointAnglesRad, 0, 7);
         Array.Copy(frame, Events, result.eventTimesSec, 0, 6);
         return result;

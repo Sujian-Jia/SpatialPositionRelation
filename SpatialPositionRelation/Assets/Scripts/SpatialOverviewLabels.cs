@@ -21,7 +21,7 @@ internal sealed class SpatialOverviewLabels
     }
 
     public void Draw(Camera camera, Rect viewport, Rect controls, GUIStyle style, Vector3 sun,
-        SpatialSensorView[] sensors)
+        bool showSunVector, SpatialSensorView[] sensors)
     {
         Rect first = Place(camera, viewport, controls, targetParts, out Vector2 firstTip);
         Rect second = Place(camera, viewport, controls, chaserParts, out Vector2 secondTip);
@@ -36,7 +36,7 @@ internal sealed class SpatialOverviewLabels
         }
         DrawRole(first, firstTip, "目标航天器", new Color(0.54f, 0.93f, 1f), style);
         DrawRole(second, secondTip, "己方航天器", new Color(0.82f, 1f, 0.63f), style);
-        if (Project(camera, sun, out Vector2 solarPixel) && viewport.Contains(solarPixel) && !controls.Contains(solarPixel))
+        if (showSunVector && Project(camera, sun, out Vector2 solarPixel) && viewport.Contains(solarPixel) && !controls.Contains(solarPixel))
         {
             GUI.color = new Color(1f, 0.83f, 0.52f);
             GUI.Box(new Rect(Mathf.Clamp(solarPixel.x + 11, 4, viewport.xMax - 143), solarPixel.y - 28, 139, 26),
